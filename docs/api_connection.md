@@ -2,7 +2,8 @@
 
 PlankaStarten is connected to
 [Olegie/PlankaC](https://github.com/Olegie/PlankaC) through
-`c/include/plankac.h`.
+`c/include/plankac.h`. PlankaC provides the compiler, loader, runtime and
+backend API; PlankaStarten is the host application built on top of it.
 
 The host does not parse `.plk` itself. It passes source paths to
 `plankac_context_load_sources`, then uses the loaded context for inspection,

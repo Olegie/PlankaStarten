@@ -8,7 +8,7 @@ PlankaStarten ist eine eigenstaendige C-Anwendung zum Laden, Pruefen,
 Ausfuehren und Uebersetzen von `.plk`-Dateien ueber die oeffentliche PlankaC
 API.
 
-Der zugehoerige Sprachkern liegt in
+Der zugehoerige Compiler und Sprachkern liegt in
 [Olegie/PlankaC](https://github.com/Olegie/PlankaC). PlankaStarten ist die
 Arbeitsoberflaeche und das Einbettungsbeispiel fuer diese API.
 
@@ -145,7 +145,7 @@ plankac_format
 ```
 
 Damit bleibt die Grenze sauber: PlankaStarten ist Host und Werkzeugoberflaeche;
-PlankaC bleibt Sprachkern, Loader, Runtime und Backend-Schicht. Der native
+PlankaC bleibt Compiler, Loader, Runtime und Backend-Schicht. Der native
 Compile-Befehl bleibt an derselben Grenze: PlankaC erzeugt die
 Sprachartefakte, PlankaStarten waehlt das passende Host-Profil und ruft den
 lokalen C-Compiler auf.
@@ -157,7 +157,7 @@ lokalen C-Compiler auf.
 PlankaStarten is a standalone C application for loading, checking, running and
 compiling `.plk` files through the public PlankaC API.
 
-The language core is maintained in
+The compiler and language core are maintained in
 [Olegie/PlankaC](https://github.com/Olegie/PlankaC). PlankaStarten is the
 workbench and embedding example built around that API.
 
@@ -241,5 +241,5 @@ build\plankastarten_cli.exe compile examples\max3.plk
 
 ## Boundary
 
-PlankaStarten is the host and tool surface. PlankaC remains the language core,
+PlankaStarten is the host and tool surface. PlankaC remains the compiler,
 loader, runtime, type/checking layer and backend layer.
