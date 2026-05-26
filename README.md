@@ -14,11 +14,14 @@ host program: it links against `libplankac.a`, includes `plankac.h`, creates a
 
 - Win32 graphical workbench written in C.
 - File list for `.plk` sources in a selected folder.
-- Editable source pane.
+- Editable source pane with line numbers, cursor position and newline
+  normalization for Win32 editing.
 - Procedure list.
 - Procedure name and argument fields.
 - Console-style command input.
 - Output console.
+- Source formatting command that preserves leading table/notation spacing,
+  removes trailing whitespace and separates procedures after `END`.
 - API-backed commands: check, run, bytecode, IR, evidence, generated C,
   generated x86-64 ASM and generated 8086 ASM.
 - Console runner for scripts and smoke tests.
@@ -62,6 +65,7 @@ Useful command input examples:
 check
 run start
 run max3 4 9 7
+format
 bytecode
 ir
 evidence

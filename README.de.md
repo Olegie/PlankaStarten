@@ -20,10 +20,13 @@ einbetten kann:
 
 - `.plk`-Dateien aus einem Arbeitsordner laden
 - Prozeduren anzeigen
-- Quelltext bearbeiten und speichern
+- Quelltext mit Zeilennummern, Cursorposition und sauberer
+  Zeilenumbruch-Normalisierung bearbeiten und speichern
 - Prozeduren mit Argumenten ausfuehren
 - Bytecode, IR, Evidence JSON, C, x86-64 ASM und 8086 ASM erzeugen
 - Ausgaben in einer einfachen Konsolenflaeche anzeigen
+- Quelltext formatieren, ohne fuehrende Tabellenabstaende zu zerstoeren:
+  Leerraum am Zeilenende wird entfernt, nach `END` wird sauber getrennt
 
 Die grafische Oberflaeche bleibt bewusst direkt und technisch. Sie ist als
 Arbeitsfenster gedacht: Dateiliste links, Editor in der Mitte, Prozeduren und
@@ -75,6 +78,7 @@ Nuetzliche Eingaben im Befehlsfeld:
 check
 run start
 run max3 4 9 7
+format
 save
 bytecode
 ir

@@ -5,6 +5,7 @@ The graphical command field accepts:
 ```text
 check
 run <procedure> [args...]
+format
 save
 bytecode
 ir
@@ -13,6 +14,10 @@ cgen
 asmgen
 asm8086
 ```
+
+`format` normalizes the editor buffer for Win32 display, removes trailing
+spaces and keeps leading whitespace intact so table-style `.plk` rows are not
+damaged.
 
 The CLI accepts:
 

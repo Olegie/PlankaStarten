@@ -18,6 +18,7 @@
 #define IDC_LOAD_DIR 1002
 #define IDC_FILE_LIST 1003
 #define IDC_EDITOR 1004
+#define IDC_LINE_NUMBERS 1013
 #define IDC_PROC_LIST 1005
 #define IDC_PROC_NAME 1006
 #define IDC_ARGS 1007
@@ -36,11 +37,13 @@
 #define IDC_ASM8086 1110
 #define IDC_CLEAR 1111
 #define IDC_EXEC 1112
+#define IDC_FORMAT 1113
 
 typedef struct PS_APP {
     HWND hwnd;
     HWND workspace_edit;
     HWND file_list;
+    HWND line_numbers;
     HWND editor;
     HWND proc_list;
     HWND proc_name;
@@ -49,6 +52,7 @@ typedef struct PS_APP {
     HWND console;
     HWND status;
     HFONT font;
+    HFONT ui_font;
     char workspace[PS_MAX_PATH_TEXT];
     char files[PS_MAX_FILES][PS_MAX_PATH_TEXT];
     int file_count;
@@ -57,9 +61,52 @@ typedef struct PS_APP {
 
 static PS_APP g_app;
 
+static void ps_update_line_numbers(void);
+
 static void ps_set_status(const char *text)
 {
     SetWindowTextA(g_app.status, text);
+}
+
+static void ps_update_cursor_status(void)
+{
+    DWORD sel;
+    int pos;
+    int line;
+    int line_start;
+    int col;
+    char text[256];
+
+    if (g_app.editor == 0) {
+        return;
+    }
+    sel = (DWORD)SendMessageA(g_app.editor, EM_GETSEL, 0, 0);
+    pos = LOWORD(sel);
+    line = (int)SendMessageA(g_app.editor, EM_LINEFROMCHAR, pos, 0);
+    line_start = (int)SendMessageA(g_app.editor, EM_LINEINDEX, line, 0);
+    col = pos - line_start;
+    snprintf(text, sizeof(text),
+        "Ready  |  Ln %d, Col %d  |  PLK source via PlankaC API",
+        line + 1, col + 1);
+    ps_set_status(text);
+}
+
+static void ps_sync_line_number_scroll(void)
+{
+    int editor_first;
+    int gutter_first;
+
+    if (g_app.editor == 0 || g_app.line_numbers == 0) {
+        return;
+    }
+    editor_first = (int)SendMessageA(g_app.editor,
+        EM_GETFIRSTVISIBLELINE, 0, 0);
+    gutter_first = (int)SendMessageA(g_app.line_numbers,
+        EM_GETFIRSTVISIBLELINE, 0, 0);
+    if (editor_first != gutter_first) {
+        SendMessageA(g_app.line_numbers, EM_LINESCROLL, 0,
+            editor_first - gutter_first);
+    }
 }
 
 static void ps_append_console(const char *text)
@@ -122,6 +169,126 @@ static int ps_read_file(const char *path, char *out, unsigned out_size)
     return 1;
 }
 
+static void ps_to_windows_newlines(const char *in, char *out,
+    unsigned out_size)
+{
+    unsigned n;
+
+    n = 0;
+    while (in != 0 && *in != '\0' && n + 2 < out_size) {
+        if (*in == '\r') {
+            out[n++] = *in++;
+            if (*in == '\n' && n + 1 < out_size) {
+                out[n++] = *in++;
+            }
+        } else if (*in == '\n') {
+            out[n++] = '\r';
+            out[n++] = '\n';
+            ++in;
+        } else {
+            out[n++] = *in++;
+        }
+    }
+    out[n] = '\0';
+}
+
+static void ps_to_file_newlines(char *text)
+{
+    char *read;
+    char *write;
+
+    read = text;
+    write = text;
+    while (*read != '\0') {
+        if (read[0] == '\r' && read[1] == '\n') {
+            *write++ = '\n';
+            read += 2;
+        } else {
+            *write++ = *read++;
+        }
+    }
+    *write = '\0';
+}
+
+static void ps_format_plk_in_editor(void)
+{
+    char *raw;
+    char *normalized;
+    char *formatted;
+    char *line;
+    char *next;
+    int len;
+    unsigned out_size;
+    unsigned out_pos;
+
+    len = GetWindowTextLengthA(g_app.editor);
+    raw = (char *)malloc((size_t)len + 1);
+    normalized = (char *)malloc((size_t)len + 1);
+    formatted = (char *)malloc((size_t)len * 2 + 4096);
+    if (raw == 0 || normalized == 0 || formatted == 0) {
+        free(raw);
+        free(normalized);
+        free(formatted);
+        ps_append_console("format failed: out of memory");
+        return;
+    }
+    GetWindowTextA(g_app.editor, raw, len + 1);
+    strcpy(normalized, raw);
+    ps_to_file_newlines(normalized);
+
+    out_size = (unsigned)len * 2 + 4096;
+    out_pos = 0;
+    formatted[0] = '\0';
+    line = normalized;
+    while (line != 0 && *line != '\0') {
+        char *end;
+        char saved;
+        char *trim;
+        int is_end;
+
+        end = strchr(line, '\n');
+        if (end != 0) {
+            saved = *end;
+            *end = '\0';
+            next = end + 1;
+        } else {
+            saved = '\0';
+            next = 0;
+        }
+        trim = line + strlen(line);
+        while (trim > line && (trim[-1] == ' ' || trim[-1] == '\t'
+                || trim[-1] == '\r')) {
+            --trim;
+        }
+        *trim = '\0';
+        is_end = strcmp(line, "END") == 0;
+        if (out_pos + strlen(line) + 4 < out_size) {
+            strcpy(formatted + out_pos, line);
+            out_pos += (unsigned)strlen(line);
+            formatted[out_pos++] = '\r';
+            formatted[out_pos++] = '\n';
+            formatted[out_pos] = '\0';
+            if (is_end && next != 0 && next[0] != '\n'
+                    && out_pos + 3 < out_size) {
+                formatted[out_pos++] = '\r';
+                formatted[out_pos++] = '\n';
+                formatted[out_pos] = '\0';
+            }
+        }
+        if (end != 0) {
+            *end = saved;
+        }
+        line = next;
+    }
+    SetWindowTextA(g_app.editor, formatted);
+    ps_update_line_numbers();
+    ps_append_console("formatted current editor buffer");
+    ps_set_status("Formatted");
+    free(raw);
+    free(normalized);
+    free(formatted);
+}
+
 static int ps_write_file(const char *path, const char *text)
 {
     FILE *f;
@@ -135,9 +302,49 @@ static int ps_write_file(const char *path, const char *text)
     return 1;
 }
 
+static int ps_editor_line_count(void)
+{
+    int count;
+
+    count = (int)SendMessageA(g_app.editor, EM_GETLINECOUNT, 0, 0);
+    return count > 0 ? count : 1;
+}
+
+static void ps_update_line_numbers(void)
+{
+    int lines;
+    int i;
+    unsigned pos;
+    char *text;
+    char number[32];
+
+    if (g_app.line_numbers == 0 || g_app.editor == 0) {
+        return;
+    }
+    lines = ps_editor_line_count();
+    text = (char *)malloc((size_t)lines * 8 + 1);
+    if (text == 0) {
+        return;
+    }
+    pos = 0;
+    text[0] = '\0';
+    for (i = 1; i <= lines; ++i) {
+        snprintf(number, sizeof(number), "%4d\r\n", i);
+        if (pos + strlen(number) + 1 < (unsigned)lines * 8 + 1) {
+            strcpy(text + pos, number);
+            pos += (unsigned)strlen(number);
+        }
+    }
+    SetWindowTextA(g_app.line_numbers, text);
+    free(text);
+    ps_sync_line_number_scroll();
+    ps_update_cursor_status();
+}
+
 static void ps_load_selected_file(void)
 {
     char text[PS_MAX_TEXT];
+    char display[PS_MAX_TEXT * 2];
 
     if (g_app.selected_file < 0 || g_app.selected_file >= g_app.file_count) {
         SetWindowTextA(g_app.editor, "");
@@ -147,7 +354,9 @@ static void ps_load_selected_file(void)
         ps_appendf("cannot read %s", g_app.files[g_app.selected_file]);
         return;
     }
-    SetWindowTextA(g_app.editor, text);
+    ps_to_windows_newlines(text, display, sizeof(display));
+    SetWindowTextA(g_app.editor, display);
+    ps_update_line_numbers();
     ps_appendf("opened %s", g_app.files[g_app.selected_file]);
 }
 
@@ -256,7 +465,7 @@ static void ps_check_project(void)
     plankac_context_summary(ctx, summary, sizeof(summary));
     ps_fill_procedures(ctx);
     ps_append_console(summary);
-    ps_set_status("Ready");
+    ps_update_cursor_status();
     plankac_destroy(ctx);
 }
 
@@ -335,6 +544,7 @@ static void ps_save_current(void)
         return;
     }
     GetWindowTextA(g_app.editor, text, len + 1);
+    ps_to_file_newlines(text);
     if (!ps_write_file(g_app.files[g_app.selected_file], text)) {
         ps_appendf("save failed: %s", g_app.files[g_app.selected_file]);
         free(text);
@@ -343,6 +553,7 @@ static void ps_save_current(void)
     free(text);
     ps_appendf("saved %s", g_app.files[g_app.selected_file]);
     ps_set_status("Saved");
+    ps_update_line_numbers();
 }
 
 static void ps_make_build_path(char *out, unsigned out_size,
@@ -422,6 +633,8 @@ static void ps_execute_command(void)
         ps_run_proc();
     } else if (strcmp(verb, "save") == 0) {
         ps_save_current();
+    } else if (strcmp(verb, "format") == 0) {
+        ps_format_plk_in_editor();
     } else if (strcmp(verb, "bytecode") == 0) {
         ps_write_artifact("bytecode");
     } else if (strcmp(verb, "ir") == 0) {
@@ -435,7 +648,7 @@ static void ps_execute_command(void)
     } else if (strcmp(verb, "asm8086") == 0) {
         ps_write_artifact("asm8086");
     } else {
-        ps_append_console("commands: check, run <proc> [args], save, bytecode, ir, evidence, cgen, asmgen, asm8086");
+        ps_append_console("commands: check, run <proc> [args], format, save, bytecode, ir, evidence, cgen, asmgen, asm8086");
     }
     SetWindowTextA(g_app.command_edit, "");
 }
@@ -493,6 +706,11 @@ static void ps_layout(HWND hwnd)
     int console_h;
     int y;
     int button_w;
+    int editor_x;
+    int editor_y;
+    int editor_w;
+    int editor_h;
+    int gutter_w;
 
     GetClientRect(hwnd, &rc);
     w = rc.right - rc.left;
@@ -502,7 +720,8 @@ static void ps_layout(HWND hwnd)
     right_w = 240;
     console_h = 150;
     mid_x = left_w + 16;
-    button_w = 74;
+    button_w = 68;
+    gutter_w = 54;
 
     MoveWindow(g_app.status, 8, top, w - 16, 22, TRUE);
     top += 30;
@@ -513,19 +732,26 @@ static void ps_layout(HWND hwnd)
 
     y = 38;
     MoveWindow(GetDlgItem(hwnd, IDC_SAVE), mid_x, y, button_w, 24, TRUE);
-    MoveWindow(GetDlgItem(hwnd, IDC_CHECK), mid_x + 78, y, button_w, 24, TRUE);
-    MoveWindow(GetDlgItem(hwnd, IDC_RUN), mid_x + 156, y, button_w, 24, TRUE);
-    MoveWindow(GetDlgItem(hwnd, IDC_LIST), mid_x + 234, y, button_w, 24, TRUE);
-    MoveWindow(GetDlgItem(hwnd, IDC_BYTECODE), mid_x + 312, y, button_w, 24, TRUE);
-    MoveWindow(GetDlgItem(hwnd, IDC_IR), mid_x + 390, y, button_w, 24, TRUE);
-    MoveWindow(GetDlgItem(hwnd, IDC_EVIDENCE), mid_x + 468, y, button_w, 24, TRUE);
-    MoveWindow(GetDlgItem(hwnd, IDC_CGEN), mid_x + 546, y, button_w, 24, TRUE);
-    MoveWindow(GetDlgItem(hwnd, IDC_ASMGEN), mid_x + 624, y, button_w, 24, TRUE);
-    MoveWindow(GetDlgItem(hwnd, IDC_ASM8086), mid_x + 702, y, button_w, 24, TRUE);
-    MoveWindow(GetDlgItem(hwnd, IDC_CLEAR), w - 88, y, 80, 24, TRUE);
+    MoveWindow(GetDlgItem(hwnd, IDC_FORMAT), mid_x + 72, y, button_w, 24, TRUE);
+    MoveWindow(GetDlgItem(hwnd, IDC_CHECK), mid_x + 144, y, button_w, 24, TRUE);
+    MoveWindow(GetDlgItem(hwnd, IDC_RUN), mid_x + 216, y, button_w, 24, TRUE);
+    MoveWindow(GetDlgItem(hwnd, IDC_LIST), mid_x + 288, y, button_w, 24, TRUE);
+    MoveWindow(GetDlgItem(hwnd, IDC_BYTECODE), mid_x + 360, y, button_w, 24, TRUE);
+    MoveWindow(GetDlgItem(hwnd, IDC_IR), mid_x + 432, y, button_w, 24, TRUE);
+    MoveWindow(GetDlgItem(hwnd, IDC_EVIDENCE), mid_x + 504, y, button_w, 24, TRUE);
+    MoveWindow(GetDlgItem(hwnd, IDC_CGEN), mid_x + 576, y, button_w, 24, TRUE);
+    MoveWindow(GetDlgItem(hwnd, IDC_ASMGEN), mid_x + 648, y, button_w, 24, TRUE);
+    MoveWindow(GetDlgItem(hwnd, IDC_ASM8086), mid_x + 720, y, button_w, 24, TRUE);
+    MoveWindow(GetDlgItem(hwnd, IDC_CLEAR), mid_x + 792, y, button_w, 24, TRUE);
 
-    MoveWindow(g_app.editor, mid_x, 70,
-        w - left_w - right_w - 32, h - console_h - 82, TRUE);
+    editor_x = mid_x;
+    editor_y = 70;
+    editor_w = w - left_w - right_w - 32;
+    editor_h = h - console_h - 82;
+    MoveWindow(g_app.line_numbers, editor_x, editor_y,
+        gutter_w, editor_h, TRUE);
+    MoveWindow(g_app.editor, editor_x + gutter_w - 1, editor_y,
+        editor_w - gutter_w + 1, editor_h, TRUE);
     MoveWindow(g_app.proc_list, w - right_w - 8, 70,
         right_w, (h - console_h - 130) / 2, TRUE);
     MoveWindow(g_app.proc_name, w - right_w - 8,
@@ -545,11 +771,14 @@ static void ps_create_controls(HWND hwnd)
     g_app.font = CreateFontA(16, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
         ANSI_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
         DEFAULT_QUALITY, FIXED_PITCH | FF_MODERN, "Consolas");
+    g_app.ui_font = CreateFontA(15, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+        ANSI_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+        DEFAULT_QUALITY, DEFAULT_PITCH | FF_SWISS, "MS Sans Serif");
     g_app.status = CreateWindowExA(WS_EX_CLIENTEDGE, "STATIC",
         "PlankaStarten ready", WS_CHILD | WS_VISIBLE,
         0, 0, 100, 20, hwnd, (HMENU)(INT_PTR)IDC_STATUS,
         GetModuleHandleA(0), 0);
-    SendMessageA(g_app.status, WM_SETFONT, (WPARAM)g_app.font, TRUE);
+    SendMessageA(g_app.status, WM_SETFONT, (WPARAM)g_app.ui_font, TRUE);
     g_app.workspace_edit = ps_edit(hwnd, IDC_WORKSPACE, 0);
     ps_button(hwnd, "Open", IDC_LOAD_DIR);
     g_app.file_list = CreateWindowExA(WS_EX_CLIENTEDGE, "LISTBOX", "",
@@ -557,8 +786,15 @@ static void ps_create_controls(HWND hwnd)
         0, 0, 100, 100, hwnd, (HMENU)(INT_PTR)IDC_FILE_LIST,
         GetModuleHandleA(0), 0);
     SendMessageA(g_app.file_list, WM_SETFONT, (WPARAM)g_app.font, TRUE);
+    g_app.line_numbers = CreateWindowExA(WS_EX_CLIENTEDGE, "EDIT", "   1",
+        WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_READONLY
+            | ES_RIGHT | ES_AUTOVSCROLL,
+        0, 0, 48, 100, hwnd, (HMENU)(INT_PTR)IDC_LINE_NUMBERS,
+        GetModuleHandleA(0), 0);
+    SendMessageA(g_app.line_numbers, WM_SETFONT, (WPARAM)g_app.font, TRUE);
     g_app.editor = ps_edit(hwnd, IDC_EDITOR,
         ES_MULTILINE | ES_WANTRETURN | ES_AUTOVSCROLL | WS_VSCROLL);
+    SendMessageA(g_app.editor, EM_SETMARGINS, EC_LEFTMARGIN, 6);
     g_app.proc_list = CreateWindowExA(WS_EX_CLIENTEDGE, "LISTBOX", "",
         WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_VSCROLL | LBS_NOTIFY,
         0, 0, 100, 100, hwnd, (HMENU)(INT_PTR)IDC_PROC_LIST,
@@ -571,12 +807,13 @@ static void ps_create_controls(HWND hwnd)
         ES_MULTILINE | ES_AUTOVSCROLL | ES_READONLY | WS_VSCROLL);
 
     ps_button(hwnd, "Save", IDC_SAVE);
+    ps_button(hwnd, "Format", IDC_FORMAT);
     ps_button(hwnd, "Check", IDC_CHECK);
     ps_button(hwnd, "Run", IDC_RUN);
     ps_button(hwnd, "List", IDC_LIST);
     ps_button(hwnd, "PBC", IDC_BYTECODE);
     ps_button(hwnd, "IR", IDC_IR);
-    ps_button(hwnd, "Evidence", IDC_EVIDENCE);
+    ps_button(hwnd, "Evid", IDC_EVIDENCE);
     ps_button(hwnd, "C", IDC_CGEN);
     ps_button(hwnd, "ASM", IDC_ASMGEN);
     ps_button(hwnd, "8086", IDC_ASM8086);
@@ -603,6 +840,7 @@ static void ps_default_workspace(void)
     SetWindowTextA(g_app.proc_name, "start");
     SetWindowTextA(g_app.args_edit, "");
     SetWindowTextA(g_app.command_edit, "run start");
+    ps_check_project();
 }
 
 static LRESULT CALLBACK ps_wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
@@ -641,8 +879,17 @@ static LRESULT CALLBACK ps_wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                 sscanf(line, "P%*d %127s", name);
                 SetWindowTextA(g_app.proc_name, name);
             }
+        } else if (id == IDC_EDITOR && code == EN_CHANGE) {
+            ps_update_line_numbers();
+        } else if (id == IDC_EDITOR && code == EN_VSCROLL) {
+            ps_sync_line_number_scroll();
+        } else if (id == IDC_EDITOR
+                && (code == EN_UPDATE || code == EN_SETFOCUS)) {
+            ps_update_cursor_status();
         } else if (id == IDC_SAVE) {
             ps_save_current();
+        } else if (id == IDC_FORMAT) {
+            ps_format_plk_in_editor();
         } else if (id == IDC_CHECK || id == IDC_LIST) {
             ps_check_project();
         } else if (id == IDC_RUN) {
@@ -668,6 +915,9 @@ static LRESULT CALLBACK ps_wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     case WM_DESTROY:
         if (g_app.font != 0) {
             DeleteObject(g_app.font);
+        }
+        if (g_app.ui_font != 0) {
+            DeleteObject(g_app.ui_font);
         }
         PostQuitMessage(0);
         return 0;
