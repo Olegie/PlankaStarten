@@ -1,6 +1,8 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include <commctrl.h>
 #include <commdlg.h>
+#include <shellapi.h>
 #include <shlobj.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -8,11 +10,15 @@
 #include <stdarg.h>
 
 #include "plankac.h"
+#include "plankastarten_compile.h"
 
-#define PS_MAX_FILES 128
+#define PS_MAX_FILES 512
 #define PS_MAX_PATH_TEXT 512
 #define PS_MAX_TEXT 65536
 #define PS_MAX_LINE 1024
+#define PS_MIN_WINDOW_W 980
+#define PS_MIN_WINDOW_H 620
+#define PS_MAX_TREE_DEPTH 24
 
 #define IDC_WORKSPACE 1001
 #define IDC_LOAD_DIR 1002
@@ -38,11 +44,12 @@
 #define IDC_CLEAR 1111
 #define IDC_EXEC 1112
 #define IDC_FORMAT 1113
+#define IDC_COMPILE 1114
 
 typedef struct PS_APP {
     HWND hwnd;
     HWND workspace_edit;
-    HWND file_list;
+    HWND file_tree;
     HWND line_numbers;
     HWND editor;
     HWND proc_list;
@@ -57,12 +64,52 @@ typedef struct PS_APP {
     char files[PS_MAX_FILES][PS_MAX_PATH_TEXT];
     int file_count;
     int selected_file;
+    int loading_tree;
+    HTREEITEM first_file_item;
 } PS_APP;
 
 static PS_APP g_app;
 
 static void ps_update_line_numbers(void);
 static void ps_check_project(void);
+
+static void ps_set_min_track(MINMAXINFO *mmi)
+{
+    mmi->ptMinTrackSize.x = PS_MIN_WINDOW_W;
+    mmi->ptMinTrackSize.y = PS_MIN_WINDOW_H;
+}
+
+static void ps_clamp_windowpos(WINDOWPOS *pos)
+{
+    if ((pos->flags & SWP_NOSIZE) != 0) {
+        return;
+    }
+    if (pos->cx < PS_MIN_WINDOW_W) {
+        pos->cx = PS_MIN_WINDOW_W;
+    }
+    if (pos->cy < PS_MIN_WINDOW_H) {
+        pos->cy = PS_MIN_WINDOW_H;
+    }
+}
+
+static void ps_enforce_min_window(HWND hwnd)
+{
+    RECT rc;
+    int ww;
+    int wh;
+    int nw;
+    int nh;
+
+    GetWindowRect(hwnd, &rc);
+    ww = rc.right - rc.left;
+    wh = rc.bottom - rc.top;
+    nw = ww < PS_MIN_WINDOW_W ? PS_MIN_WINDOW_W : ww;
+    nh = wh < PS_MIN_WINDOW_H ? PS_MIN_WINDOW_H : wh;
+    if (nw != ww || nh != wh) {
+        SetWindowPos(hwnd, 0, 0, 0, nw, nh,
+            SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+    }
+}
 
 static void ps_set_status(const char *text)
 {
@@ -362,56 +409,189 @@ static void ps_load_selected_file(void)
     ps_check_project();
 }
 
-static void ps_scan_workspace(void)
+static const char *ps_path_leaf(const char *path)
+{
+    const char *leaf;
+    const char *p;
+
+    leaf = path;
+    for (p = path; p != 0 && *p != '\0'; ++p) {
+        if (*p == '\\' || *p == '/') {
+            leaf = p + 1;
+        }
+    }
+    return *leaf == '\0' ? path : leaf;
+}
+
+static int ps_skip_tree_dir(const char *name)
+{
+    if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0) {
+        return 1;
+    }
+    if (strcmp(name, ".git") == 0 || strcmp(name, "build") == 0) {
+        return 1;
+    }
+    return 0;
+}
+
+static HTREEITEM ps_tree_insert(const char *label, HTREEITEM parent,
+    LPARAM value)
+{
+    TVINSERTSTRUCTA item;
+
+    memset(&item, 0, sizeof(item));
+    item.hParent = parent;
+    item.hInsertAfter = TVI_LAST;
+    item.item.mask = TVIF_TEXT | TVIF_PARAM;
+    item.item.pszText = (LPSTR)label;
+    item.item.lParam = value;
+    return TreeView_InsertItem(g_app.file_tree, &item);
+}
+
+static void ps_scan_tree_dir(const char *dir, HTREEITEM parent, int depth)
 {
     WIN32_FIND_DATAA data;
     HANDLE find;
     char pattern[PS_MAX_PATH_TEXT];
-    int i;
+    char child_path[PS_MAX_PATH_TEXT];
+    HTREEITEM folder;
+    HTREEITEM child;
+    int file_index;
 
-    GetWindowTextA(g_app.workspace_edit, g_app.workspace,
-        sizeof(g_app.workspace));
-    SendMessageA(g_app.file_list, LB_RESETCONTENT, 0, 0);
-    g_app.file_count = 0;
-    g_app.selected_file = -1;
-    ps_join_path(pattern, sizeof(pattern), g_app.workspace, "*.plk");
+    if (depth > PS_MAX_TREE_DEPTH) {
+        return;
+    }
+
+    ps_join_path(pattern, sizeof(pattern), dir, "*");
+    find = FindFirstFileA(pattern, &data);
+    if (find != INVALID_HANDLE_VALUE) {
+        do {
+            if ((data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0
+                    && !ps_skip_tree_dir(data.cFileName)) {
+                ps_join_path(child_path, sizeof(child_path), dir,
+                    data.cFileName);
+                folder = ps_tree_insert(data.cFileName, parent, 0);
+                ps_scan_tree_dir(child_path, folder, depth + 1);
+                child = TreeView_GetChild(g_app.file_tree, folder);
+                if (child == 0) {
+                    TreeView_DeleteItem(g_app.file_tree, folder);
+                } else if (depth < 2) {
+                    TreeView_Expand(g_app.file_tree, folder, TVE_EXPAND);
+                }
+            }
+        } while (FindNextFileA(find, &data));
+        FindClose(find);
+    }
+
     find = FindFirstFileA(pattern, &data);
     if (find == INVALID_HANDLE_VALUE) {
-        ps_set_status("No .plk files found");
-        ps_appendf("no .plk files in %s", g_app.workspace);
         return;
     }
     do {
         if ((data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0
                 && ps_ends_with_plk(data.cFileName)
                 && g_app.file_count < PS_MAX_FILES) {
-            ps_join_path(g_app.files[g_app.file_count],
-                sizeof(g_app.files[g_app.file_count]),
-                g_app.workspace, data.cFileName);
-            SendMessageA(g_app.file_list, LB_ADDSTRING, 0,
-                (LPARAM)data.cFileName);
+            file_index = g_app.file_count;
+            ps_join_path(g_app.files[file_index],
+                sizeof(g_app.files[file_index]), dir, data.cFileName);
+            child = ps_tree_insert(data.cFileName, parent,
+                (LPARAM)(file_index + 1));
+            if (g_app.first_file_item == 0) {
+                g_app.first_file_item = child;
+            }
             ++g_app.file_count;
         }
     } while (FindNextFileA(find, &data));
     FindClose(find);
-    for (i = 0; i < g_app.file_count; ++i) {
-        (void)i;
+}
+
+static void ps_scan_workspace(void)
+{
+    const char *root_label;
+    HTREEITEM root;
+
+    GetWindowTextA(g_app.workspace_edit, g_app.workspace,
+        sizeof(g_app.workspace));
+    TreeView_DeleteAllItems(g_app.file_tree);
+    g_app.file_count = 0;
+    g_app.selected_file = -1;
+    g_app.loading_tree = 0;
+    g_app.first_file_item = 0;
+
+    root_label = ps_path_leaf(g_app.workspace);
+    root = ps_tree_insert(root_label, TVI_ROOT, 0);
+    ps_scan_tree_dir(g_app.workspace, root, 0);
+    TreeView_Expand(g_app.file_tree, root, TVE_EXPAND);
+
+    if (g_app.file_count == 0) {
+        ps_set_status("No .plk files found");
+        ps_appendf("no .plk files in %s", g_app.workspace);
+        return;
     }
-    if (g_app.file_count > 0) {
-        g_app.selected_file = 0;
-        SendMessageA(g_app.file_list, LB_SETCURSEL, 0, 0);
-        ps_load_selected_file();
-        ps_set_status("Workspace loaded");
+
+    g_app.selected_file = 0;
+    if (g_app.first_file_item != 0) {
+        g_app.loading_tree = 1;
+        TreeView_SelectItem(g_app.file_tree, g_app.first_file_item);
+        g_app.loading_tree = 0;
     }
+    ps_load_selected_file();
+    ps_set_status("Workspace loaded");
     ps_appendf("workspace: %s (%d .plk file%s)", g_app.workspace,
         g_app.file_count, g_app.file_count == 1 ? "" : "s");
+}
+
+static void ps_parent_dir(const char *path, char *out, unsigned out_size)
+{
+    char *slash;
+    char *alt;
+
+    if (out_size == 0) {
+        return;
+    }
+    strncpy(out, path != 0 ? path : "", out_size - 1);
+    out[out_size - 1] = '\0';
+    slash = strrchr(out, '\\');
+    alt = strrchr(out, '/');
+    if (alt != 0 && (slash == 0 || alt > slash)) {
+        slash = alt;
+    }
+    if (slash != 0) {
+        *slash = '\0';
+    }
+}
+
+static int ps_source_prefix_number(const char *path)
+{
+    const char *name;
+    int value;
+    int digits;
+
+    name = ps_path_leaf(path);
+    value = 0;
+    digits = 0;
+    while (*name >= '0' && *name <= '9') {
+        value = value * 10 + (*name - '0');
+        ++name;
+        ++digits;
+    }
+    if (digits == 0 || *name != '_') {
+        return -1;
+    }
+    return value;
 }
 
 static int ps_context_load_active(PLANKAC_CONTEXT **ctx_out)
 {
     PLANKAC_CONTEXT *ctx;
-    const char *sources[2];
+    const char *sources[PS_MAX_FILES + 1];
     char err[PS_MAX_LINE];
+    char active_dir[PS_MAX_PATH_TEXT];
+    char file_dir[PS_MAX_PATH_TEXT];
+    int active_prefix;
+    int file_prefix;
+    int i;
+    int count;
 
     if (g_app.selected_file < 0 || g_app.selected_file >= g_app.file_count) {
         ps_append_console("no active .plk file");
@@ -422,8 +602,23 @@ static int ps_context_load_active(PLANKAC_CONTEXT **ctx_out)
         ps_append_console("cannot create PlankaC context");
         return 0;
     }
-    sources[0] = g_app.files[g_app.selected_file];
-    sources[1] = 0;
+    ps_parent_dir(g_app.files[g_app.selected_file], active_dir,
+        sizeof(active_dir));
+    active_prefix = ps_source_prefix_number(g_app.files[g_app.selected_file]);
+    count = 0;
+    for (i = 0; i < g_app.file_count && count < PS_MAX_FILES; ++i) {
+        ps_parent_dir(g_app.files[i], file_dir, sizeof(file_dir));
+        file_prefix = ps_source_prefix_number(g_app.files[i]);
+        if (_stricmp(active_dir, file_dir) == 0
+                && active_prefix >= 0 && active_prefix < 90
+                && file_prefix >= 0 && file_prefix <= active_prefix) {
+            sources[count++] = g_app.files[i];
+        }
+    }
+    if (count == 0) {
+        sources[count++] = g_app.files[g_app.selected_file];
+    }
+    sources[count] = 0;
     err[0] = '\0';
     if (!plankac_context_load_sources(ctx, sources, err, sizeof(err))) {
         ps_appendf("load failed: %s", err);
@@ -639,6 +834,52 @@ static void ps_write_artifact(const char *kind)
     ps_set_status("Artifact written");
 }
 
+static void ps_compile_active(void)
+{
+    PLANKAC_CONTEXT *ctx;
+    PSC_COMPILE_RESULT result;
+    char err[PS_MAX_LINE];
+    HINSTANCE launched;
+
+    if (g_app.selected_file < 0 || g_app.selected_file >= g_app.file_count) {
+        ps_append_console("no selected file");
+        ps_set_status("Compile failed");
+        return;
+    }
+    ps_save_current();
+    if (!ps_context_load_active(&ctx)) {
+        ps_set_status("Compile failed");
+        return;
+    }
+    err[0] = '\0';
+    if (!psc_compile_plk(ctx, g_app.files[g_app.selected_file],
+            &result, err, sizeof(err))) {
+        ps_appendf("compile failed: %s", err);
+        ps_appendf("compile log: %s", result.log_path);
+        ps_set_status("Compile failed");
+        plankac_destroy(ctx);
+        return;
+    }
+    plankac_destroy(ctx);
+    if (result.kind == PSC_COMPILE_GUI) {
+        ps_appendf("compiled GUI exe: %s", result.exe_path);
+        ps_appendf("compile log: %s", result.log_path);
+        launched = ShellExecuteA(g_app.hwnd, "open", result.exe_path,
+            "", "", SW_SHOWNORMAL);
+        if ((INT_PTR)launched <= 32) {
+            ps_append_console("GUI exe was built but could not be launched");
+            ps_set_status("Compiled GUI exe");
+        } else {
+            ps_set_status("Compiled and launched GUI exe");
+        }
+    } else {
+        ps_appendf("compiled console exe: %s", result.exe_path);
+        ps_appendf("run it like: %s start", result.exe_path);
+        ps_appendf("compile log: %s", result.log_path);
+        ps_set_status("Compiled console exe");
+    }
+}
+
 static void ps_execute_command(void)
 {
     char command[512];
@@ -682,8 +923,10 @@ static void ps_execute_command(void)
         ps_write_artifact("asmgen");
     } else if (strcmp(verb, "asm8086") == 0) {
         ps_write_artifact("asm8086");
+    } else if (strcmp(verb, "compile") == 0) {
+        ps_compile_active();
     } else {
-        ps_append_console("commands: check, run <proc> [args], format, save, bytecode, ir, evidence, cgen, asmgen, asm8086");
+        ps_append_console("commands: check, run <proc> [args], compile, format, save, bytecode, ir, evidence, cgen, asmgen, asm8086");
     }
     SetWindowTextA(g_app.command_edit, "");
 }
@@ -739,13 +982,17 @@ static void ps_layout(HWND hwnd)
     int right_w;
     int mid_x;
     int console_h;
-    int y;
-    int button_w;
     int editor_x;
     int editor_y;
     int editor_w;
     int editor_h;
     int gutter_w;
+    int toolbar_y;
+    int button_y;
+    int bx;
+    int command_y;
+    int work_h;
+    int proc_h;
 
     GetClientRect(hwnd, &rc);
     w = rc.right - rc.left;
@@ -755,7 +1002,6 @@ static void ps_layout(HWND hwnd)
     right_w = 240;
     console_h = 150;
     mid_x = left_w + 16;
-    button_w = 68;
     gutter_w = 54;
 
     MoveWindow(g_app.status, 8, top, w - 16, 22, TRUE);
@@ -763,40 +1009,64 @@ static void ps_layout(HWND hwnd)
     MoveWindow(g_app.workspace_edit, 8, top, left_w - 76, 24, TRUE);
     MoveWindow(GetDlgItem(hwnd, IDC_LOAD_DIR), left_w - 62, top, 62, 24, TRUE);
     top += 32;
-    MoveWindow(g_app.file_list, 8, top, left_w, h - top - console_h - 16, TRUE);
+    toolbar_y = top;
+    button_y = toolbar_y + 3;
+    bx = 8;
+    MoveWindow(GetDlgItem(hwnd, IDC_SAVE), bx, button_y, 56, 24, TRUE);
+    bx += 60;
+    MoveWindow(GetDlgItem(hwnd, IDC_FORMAT), bx, button_y, 68, 24, TRUE);
+    bx += 76;
+    MoveWindow(GetDlgItem(hwnd, IDC_CHECK), bx, button_y, 62, 24, TRUE);
+    bx += 66;
+    MoveWindow(GetDlgItem(hwnd, IDC_RUN), bx, button_y, 54, 24, TRUE);
+    bx += 58;
+    MoveWindow(GetDlgItem(hwnd, IDC_COMPILE), bx, button_y, 76, 24, TRUE);
+    bx += 80;
+    MoveWindow(GetDlgItem(hwnd, IDC_LIST), bx, button_y, 54, 24, TRUE);
 
-    y = 38;
-    MoveWindow(GetDlgItem(hwnd, IDC_SAVE), mid_x, y, button_w, 24, TRUE);
-    MoveWindow(GetDlgItem(hwnd, IDC_FORMAT), mid_x + 72, y, button_w, 24, TRUE);
-    MoveWindow(GetDlgItem(hwnd, IDC_CHECK), mid_x + 144, y, button_w, 24, TRUE);
-    MoveWindow(GetDlgItem(hwnd, IDC_RUN), mid_x + 216, y, button_w, 24, TRUE);
-    MoveWindow(GetDlgItem(hwnd, IDC_LIST), mid_x + 288, y, button_w, 24, TRUE);
-    MoveWindow(GetDlgItem(hwnd, IDC_BYTECODE), mid_x + 360, y, button_w, 24, TRUE);
-    MoveWindow(GetDlgItem(hwnd, IDC_IR), mid_x + 432, y, button_w, 24, TRUE);
-    MoveWindow(GetDlgItem(hwnd, IDC_EVIDENCE), mid_x + 504, y, button_w, 24, TRUE);
-    MoveWindow(GetDlgItem(hwnd, IDC_CGEN), mid_x + 576, y, button_w, 24, TRUE);
-    MoveWindow(GetDlgItem(hwnd, IDC_ASMGEN), mid_x + 648, y, button_w, 24, TRUE);
-    MoveWindow(GetDlgItem(hwnd, IDC_ASM8086), mid_x + 720, y, button_w, 24, TRUE);
-    MoveWindow(GetDlgItem(hwnd, IDC_CLEAR), mid_x + 792, y, button_w, 24, TRUE);
+    bx += 84;
+    MoveWindow(GetDlgItem(hwnd, IDC_BYTECODE), bx, button_y, 50, 24, TRUE);
+    bx += 54;
+    MoveWindow(GetDlgItem(hwnd, IDC_IR), bx, button_y, 42, 24, TRUE);
+    bx += 46;
+    MoveWindow(GetDlgItem(hwnd, IDC_EVIDENCE), bx, button_y, 58, 24, TRUE);
+    bx += 64;
+    MoveWindow(GetDlgItem(hwnd, IDC_CGEN), bx, button_y, 38, 24, TRUE);
+    bx += 42;
+    MoveWindow(GetDlgItem(hwnd, IDC_ASMGEN), bx, button_y, 54, 24, TRUE);
+    bx += 58;
+    MoveWindow(GetDlgItem(hwnd, IDC_ASM8086), bx, button_y, 54, 24, TRUE);
+    bx += 62;
+    MoveWindow(GetDlgItem(hwnd, IDC_CLEAR), bx, button_y, 60, 24, TRUE);
+
+    top += 34;
+    command_y = h - console_h - 32;
+    work_h = command_y - top - 8;
+    if (work_h < 160) {
+        work_h = 160;
+    }
+    MoveWindow(g_app.file_tree, 8, top, left_w, work_h, TRUE);
 
     editor_x = mid_x;
-    editor_y = 70;
+    editor_y = top;
     editor_w = w - left_w - right_w - 32;
-    editor_h = h - console_h - 82;
+    editor_h = work_h;
     MoveWindow(g_app.line_numbers, editor_x, editor_y,
         gutter_w, editor_h, TRUE);
     MoveWindow(g_app.editor, editor_x + gutter_w - 1, editor_y,
         editor_w - gutter_w + 1, editor_h, TRUE);
-    MoveWindow(g_app.proc_list, w - right_w - 8, 70,
-        right_w, (h - console_h - 130) / 2, TRUE);
+    proc_h = work_h / 2;
+    if (proc_h < 120) {
+        proc_h = 120;
+    }
+    MoveWindow(g_app.proc_list, w - right_w - 8, editor_y,
+        right_w, proc_h, TRUE);
     MoveWindow(g_app.proc_name, w - right_w - 8,
-        78 + (h - console_h - 130) / 2, right_w, 24, TRUE);
+        editor_y + proc_h + 12, right_w, 24, TRUE);
     MoveWindow(g_app.args_edit, w - right_w - 8,
-        108 + (h - console_h - 130) / 2, right_w, 24, TRUE);
-    MoveWindow(g_app.command_edit, 8, h - console_h - 32,
-        w - 96, 24, TRUE);
-    MoveWindow(GetDlgItem(hwnd, IDC_EXEC), w - 84, h - console_h - 32,
-        76, 24, TRUE);
+        editor_y + proc_h + 42, right_w, 24, TRUE);
+    MoveWindow(g_app.command_edit, 8, command_y, w - 96, 24, TRUE);
+    MoveWindow(GetDlgItem(hwnd, IDC_EXEC), w - 84, command_y, 76, 24, TRUE);
     MoveWindow(g_app.console, 8, h - console_h,
         w - 16, console_h - 8, TRUE);
 }
@@ -816,11 +1086,13 @@ static void ps_create_controls(HWND hwnd)
     SendMessageA(g_app.status, WM_SETFONT, (WPARAM)g_app.ui_font, TRUE);
     g_app.workspace_edit = ps_edit(hwnd, IDC_WORKSPACE, 0);
     ps_button(hwnd, "Open", IDC_LOAD_DIR);
-    g_app.file_list = CreateWindowExA(WS_EX_CLIENTEDGE, "LISTBOX", "",
-        WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_VSCROLL | LBS_NOTIFY,
+    g_app.file_tree = CreateWindowExA(WS_EX_CLIENTEDGE, WC_TREEVIEWA, "",
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_VSCROLL
+            | TVS_HASBUTTONS | TVS_HASLINES | TVS_LINESATROOT
+            | TVS_SHOWSELALWAYS,
         0, 0, 100, 100, hwnd, (HMENU)(INT_PTR)IDC_FILE_LIST,
         GetModuleHandleA(0), 0);
-    SendMessageA(g_app.file_list, WM_SETFONT, (WPARAM)g_app.font, TRUE);
+    SendMessageA(g_app.file_tree, WM_SETFONT, (WPARAM)g_app.font, TRUE);
     g_app.line_numbers = CreateWindowExA(WS_EX_CLIENTEDGE, "EDIT", "   1",
         WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_READONLY
             | ES_RIGHT | ES_AUTOVSCROLL,
@@ -845,6 +1117,7 @@ static void ps_create_controls(HWND hwnd)
     ps_button(hwnd, "Format", IDC_FORMAT);
     ps_button(hwnd, "Check", IDC_CHECK);
     ps_button(hwnd, "Run", IDC_RUN);
+    ps_button(hwnd, "Compile", IDC_COMPILE);
     ps_button(hwnd, "List", IDC_LIST);
     ps_button(hwnd, "PBC", IDC_BYTECODE);
     ps_button(hwnd, "IR", IDC_IR);
@@ -887,18 +1160,23 @@ static LRESULT CALLBACK ps_wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         ps_create_controls(hwnd);
         ps_default_workspace();
         return 0;
+    case WM_WINDOWPOSCHANGING:
+        ps_clamp_windowpos((WINDOWPOS *)lp);
+        return 0;
     case WM_SIZE:
+        if (wp != SIZE_MINIMIZED) {
+            ps_enforce_min_window(hwnd);
+        }
         ps_layout(hwnd);
+        return 0;
+    case WM_GETMINMAXINFO:
+        ps_set_min_track((MINMAXINFO *)lp);
         return 0;
     case WM_COMMAND:
         id = LOWORD(wp);
         code = HIWORD(wp);
         if (id == IDC_LOAD_DIR) {
             ps_select_folder();
-        } else if (id == IDC_FILE_LIST && code == LBN_SELCHANGE) {
-            g_app.selected_file = (int)SendMessageA(g_app.file_list,
-                LB_GETCURSEL, 0, 0);
-            ps_load_selected_file();
         } else if (id == IDC_PROC_LIST && code == LBN_SELCHANGE) {
             char line[256];
             char name[128];
@@ -926,6 +1204,8 @@ static LRESULT CALLBACK ps_wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             ps_check_project();
         } else if (id == IDC_RUN) {
             ps_run_proc();
+        } else if (id == IDC_COMPILE) {
+            ps_compile_active();
         } else if (id == IDC_BYTECODE) {
             ps_write_artifact("bytecode");
         } else if (id == IDC_IR) {
@@ -944,6 +1224,26 @@ static LRESULT CALLBACK ps_wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             ps_execute_command();
         }
         return 0;
+    case WM_NOTIFY:
+        if (((NMHDR *)lp)->idFrom == IDC_FILE_LIST
+                && ((NMHDR *)lp)->code == TVN_SELCHANGEDA) {
+            NMTREEVIEWA *tree;
+            int file_index;
+
+            if (g_app.loading_tree) {
+                return 0;
+            }
+            tree = (NMTREEVIEWA *)lp;
+            file_index = (int)tree->itemNew.lParam - 1;
+            if (file_index >= 0 && file_index < g_app.file_count) {
+                g_app.selected_file = file_index;
+                ps_load_selected_file();
+            } else {
+                ps_set_status("Folder selected");
+            }
+            return 0;
+        }
+        break;
     case WM_DESTROY:
         if (g_app.font != 0) {
             DeleteObject(g_app.font);
@@ -956,16 +1256,22 @@ static LRESULT CALLBACK ps_wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     default:
         return DefWindowProcA(hwnd, msg, wp, lp);
     }
+    return DefWindowProcA(hwnd, msg, wp, lp);
 }
 
 int WINAPI WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show)
 {
+    INITCOMMONCONTROLSEX icc;
     WNDCLASSA wc;
     HWND hwnd;
     MSG msg;
 
     (void)prev;
     (void)cmd;
+    memset(&icc, 0, sizeof(icc));
+    icc.dwSize = sizeof(icc);
+    icc.dwICC = ICC_TREEVIEW_CLASSES;
+    InitCommonControlsEx(&icc);
     memset(&wc, 0, sizeof(wc));
     wc.lpfnWndProc = ps_wndproc;
     wc.hInstance = inst;
@@ -976,8 +1282,9 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show)
         return 1;
     }
     hwnd = CreateWindowExA(0, wc.lpszClassName,
-        "PlankaStarten - PLK API Workbench",
-        WS_OVERLAPPEDWINDOW | WS_VISIBLE,
+        "PlankaStarten",
+        WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN | WS_CLIPSIBLINGS
+            | WS_VISIBLE,
         CW_USEDEFAULT, CW_USEDEFAULT, 1120, 760,
         0, 0, inst, 0);
     if (hwnd == 0) {
