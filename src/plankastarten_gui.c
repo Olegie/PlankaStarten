@@ -62,6 +62,7 @@ typedef struct PS_APP {
 static PS_APP g_app;
 
 static void ps_update_line_numbers(void);
+static void ps_check_project(void);
 
 static void ps_set_status(const char *text)
 {
@@ -358,6 +359,7 @@ static void ps_load_selected_file(void)
     SetWindowTextA(g_app.editor, display);
     ps_update_line_numbers();
     ps_appendf("opened %s", g_app.files[g_app.selected_file]);
+    ps_check_project();
 }
 
 static void ps_scan_workspace(void)
@@ -405,15 +407,14 @@ static void ps_scan_workspace(void)
         g_app.file_count, g_app.file_count == 1 ? "" : "s");
 }
 
-static int ps_context_load(PLANKAC_CONTEXT **ctx_out)
+static int ps_context_load_active(PLANKAC_CONTEXT **ctx_out)
 {
     PLANKAC_CONTEXT *ctx;
-    const char *sources[PS_MAX_FILES + 1];
+    const char *sources[2];
     char err[PS_MAX_LINE];
-    int i;
 
-    if (g_app.file_count <= 0) {
-        ps_append_console("no .plk files loaded");
+    if (g_app.selected_file < 0 || g_app.selected_file >= g_app.file_count) {
+        ps_append_console("no active .plk file");
         return 0;
     }
     ctx = plankac_create();
@@ -421,10 +422,8 @@ static int ps_context_load(PLANKAC_CONTEXT **ctx_out)
         ps_append_console("cannot create PlankaC context");
         return 0;
     }
-    for (i = 0; i < g_app.file_count; ++i) {
-        sources[i] = g_app.files[i];
-    }
-    sources[g_app.file_count] = 0;
+    sources[0] = g_app.files[g_app.selected_file];
+    sources[1] = 0;
     err[0] = '\0';
     if (!plankac_context_load_sources(ctx, sources, err, sizeof(err))) {
         ps_appendf("load failed: %s", err);
@@ -433,6 +432,37 @@ static int ps_context_load(PLANKAC_CONTEXT **ctx_out)
     }
     *ctx_out = ctx;
     return 1;
+}
+
+static void ps_select_default_proc(PLANKAC_CONTEXT *ctx)
+{
+    PLANKAC_PROC_INFO info;
+    char first[PLANKAC_MAX_NAME];
+    char first_zero[PLANKAC_MAX_NAME];
+    int i;
+    int n;
+
+    first[0] = '\0';
+    first_zero[0] = '\0';
+    n = plankac_context_proc_count(ctx);
+    for (i = 0; i < n; ++i) {
+        if (plankac_context_get_proc(ctx, i, &info)) {
+            if (first[0] == '\0') {
+                strncpy(first, info.name, sizeof(first) - 1);
+                first[sizeof(first) - 1] = '\0';
+            }
+            if (first_zero[0] == '\0' && info.argc == 0) {
+                strncpy(first_zero, info.name, sizeof(first_zero) - 1);
+                first_zero[sizeof(first_zero) - 1] = '\0';
+            }
+        }
+    }
+    if (first_zero[0] != '\0') {
+        SetWindowTextA(g_app.proc_name, first_zero);
+        SetWindowTextA(g_app.args_edit, "");
+    } else if (first[0] != '\0') {
+        SetWindowTextA(g_app.proc_name, first);
+    }
 }
 
 static void ps_fill_procedures(PLANKAC_CONTEXT *ctx)
@@ -451,6 +481,9 @@ static void ps_fill_procedures(PLANKAC_CONTEXT *ctx)
             SendMessageA(g_app.proc_list, LB_ADDSTRING, 0, (LPARAM)line);
         }
     }
+    if (n > 0) {
+        SendMessageA(g_app.proc_list, LB_SETCURSEL, 0, 0);
+    }
 }
 
 static void ps_check_project(void)
@@ -458,12 +491,13 @@ static void ps_check_project(void)
     PLANKAC_CONTEXT *ctx;
     char summary[256];
 
-    if (!ps_context_load(&ctx)) {
+    if (!ps_context_load_active(&ctx)) {
         ps_set_status("Load failed");
         return;
     }
     plankac_context_summary(ctx, summary, sizeof(summary));
     ps_fill_procedures(ctx);
+    ps_select_default_proc(ctx);
     ps_append_console(summary);
     ps_update_cursor_status();
     plankac_destroy(ctx);
@@ -496,7 +530,7 @@ static void ps_run_proc(void)
     int argc;
     int i;
 
-    if (!ps_context_load(&ctx)) {
+    if (!ps_context_load_active(&ctx)) {
         ps_set_status("Load failed");
         return;
     }
@@ -507,6 +541,7 @@ static void ps_run_proc(void)
     if (!plankac_context_run(ctx, proc, args, argc, &result,
             err, sizeof(err))) {
         ps_appendf("run failed: %s", err);
+        ps_append_console("select a procedure from the right list or type one in the Run field");
         ps_set_status("Run failed");
         plankac_destroy(ctx);
         return;
@@ -570,7 +605,7 @@ static void ps_write_artifact(const char *kind)
     char err[PS_MAX_LINE];
     int ok;
 
-    if (!ps_context_load(&ctx)) {
+    if (!ps_context_load_active(&ctx)) {
         ps_set_status("Load failed");
         return;
     }
@@ -837,10 +872,7 @@ static void ps_default_workspace(void)
         SetWindowTextA(g_app.workspace_edit, cwd);
     }
     ps_scan_workspace();
-    SetWindowTextA(g_app.proc_name, "start");
-    SetWindowTextA(g_app.args_edit, "");
-    SetWindowTextA(g_app.command_edit, "run start");
-    ps_check_project();
+    SetWindowTextA(g_app.command_edit, "run");
 }
 
 static LRESULT CALLBACK ps_wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)

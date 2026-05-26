@@ -56,8 +56,8 @@ build\PlankaStarten.exe
 ```
 
 The default workspace is `examples\`. Use **Open** to select another folder
-with `.plk` files. The workbench loads all `.plk` files in the folder as one
-source set.
+with `.plk` files. The left panel is a file browser. The active selected file
+is the source set used by **Check**, **Run** and backend output commands.
 
 Useful command input examples:
 

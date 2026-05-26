@@ -15,6 +15,10 @@ asmgen
 asm8086
 ```
 
+GUI commands operate on the active selected `.plk` file in the left file list.
+Selecting another file reloads its procedure table and chooses a runnable
+zero-argument procedure when one is available.
+
 `format` normalizes the editor buffer for Win32 display, removes trailing
 spaces and keeps leading whitespace intact so table-style `.plk` rows are not
 damaged.

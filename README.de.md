@@ -69,8 +69,9 @@ build\PlankaStarten.exe
 ```
 
 Der Startordner ist `examples\`. Ueber **Open** kann ein anderer Ordner mit
-`.plk`-Dateien ausgewaehlt werden. PlankaStarten laedt alle `.plk`-Dateien im
-Ordner als ein gemeinsames Quellprofil.
+`.plk`-Dateien ausgewaehlt werden. Die linke Seite ist ein Dateibrowser. Der
+aktive ausgewaehlte Eintrag ist das Quellprofil fuer **Check**, **Run** und die
+Backend-Ausgaben.
 
 Nuetzliche Eingaben im Befehlsfeld:
 
