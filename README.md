@@ -1,94 +1,131 @@
+<p align="center">
+  <img src="docs/logo.svg" alt="PlankaStarten logo" width="560">
+</p>
+
 # PlankaStarten
 
-German README: [README.de.md](README.de.md)
+PlankaStarten ist eine eigenstaendige C-Anwendung zum Laden, Pruefen,
+Ausfuehren und Uebersetzen von `.plk`-Dateien ueber die oeffentliche PlankaC
+API.
 
-PlankaStarten is a small C workbench for running and compiling `.plk` files
-through the public PlankaC API.
+Der zugehoerige Sprachkern liegt in
+[Olegie/PlankaC](https://github.com/Olegie/PlankaC). PlankaStarten ist die
+Arbeitsoberflaeche und das Einbettungsbeispiel fuer diese API.
 
-It is intentionally separate from PlankaC. PlankaC owns the language loader,
-runtime, type checks, bytecode writer and backend emitters. PlankaStarten is a
-host program: it links against `libplankac.a`, includes `plankac.h`, creates a
-`PLANKAC_CONTEXT`, and calls the API directly.
+Das Programm ist kein zweiter Interpreter und kein Wrapper um eine externe
+Kommandozeile. Es bindet `libplankac.a` ein, verwendet `plankac.h`, erzeugt
+einen `PLANKAC_CONTEXT` und arbeitet direkt mit den API-Funktionen von
+PlankaC.
 
-## What It Provides
+## Zweck
 
-- Win32 graphical workbench written in C.
-- File list for `.plk` sources in a selected folder.
-- Editable source pane with line numbers, cursor position and newline
-  normalization for Win32 editing.
-- Procedure list.
-- Procedure name and argument fields.
-- Console-style command input.
-- Output console.
-- Source formatting command that preserves leading table/notation spacing,
-  removes trailing whitespace and separates procedures after `END`.
-- API-backed commands: check, run, bytecode, IR, evidence, generated C,
-  generated x86-64 ASM and generated 8086 ASM.
-- Console runner for scripts and smoke tests.
+PlankaStarten soll zeigen, wie ein normales C-Programm PlankaC als Bibliothek
+einbetten kann:
 
-No command shells are used to execute `.plk` files. The shell is used only by
-`build.bat` to compile the host program.
+- `.plk`-Dateien aus einem Arbeitsordner und dessen Unterordnern laden
+- Prozeduren anzeigen
+- Quelltext mit Zeilennummern, Cursorposition und sauberer
+  Zeilenumbruch-Normalisierung bearbeiten und speichern
+- Prozeduren mit Argumenten ausfuehren
+- Bytecode, IR, Evidence JSON, C, x86-64 ASM und 8086 ASM erzeugen
+- native EXE-Dateien bauen: Konsolenprofile werden Konsolenprogramme,
+  GUI- und Cube-Profile werden Windows-GUI-Programme
+- Ausgaben in einer einfachen Konsolenflaeche anzeigen
+- Quelltext formatieren, ohne fuehrende Tabellenabstaende zu zerstoeren
 
-## Build
+Die grafische Oberflaeche bleibt bewusst direkt und technisch. Sie ist als
+Arbeitsfenster gedacht: Projektbaum links, Editor in der Mitte, Prozeduren und
+Argumente rechts, unten eine Eingabezeile und die Ausgabe.
 
-Set `PLANKAC_ROOT` if PlankaC is not in `..\PlankaMath`:
+## Aufbau
+
+```text
+src/plankastarten_gui.c       Win32-Arbeitsfenster in C
+src/plankastarten_cli.c       Konsolenprogramm fuer Tests und Skripte
+src/plankastarten_compile.c   native Compile-Schicht fuer Konsole und GUI
+examples/max3.plk             kleines Beispielprogramm
+docs/api_connection.md        API-Grenze zwischen PlankaStarten und PlankaC
+docs/commands.md              Befehle der GUI und CLI
+```
+
+## Bauen
+
+PlankaStarten erwartet eine lokale PlankaC-Arbeitskopie. Wenn sie nicht unter
+`..\PlankaMath` liegt, wird der Pfad mit `PLANKAC_ROOT` gesetzt:
 
 ```bat
 set PLANKAC_ROOT=C:\Users\Admin\Downloads\PlankaMath
 build.bat
 ```
 
-The build creates:
+Der Build erzeugt:
 
 ```text
 build\PlankaStarten.exe
 build\plankastarten_cli.exe
 ```
 
-`build.bat` also runs API smoke tests against `examples\max3.plk`.
+`build.bat` fuehrt danach einen API-Test mit `examples\max3.plk` aus. Dabei
+werden Ausfuehrung, native Kompilierung und Backend-Ausgaben geprueft.
 
-## GUI
-
-Run:
+## Grafische Anwendung
 
 ```bat
 build\PlankaStarten.exe
 ```
 
-The default workspace is `examples\`. Use **Open** to select another folder
-with `.plk` files. The left panel is a file browser. The active selected file
-is the source set used by **Check**, **Run** and backend output commands.
+Der Startordner ist `examples\`. Ueber **Open** kann ein anderer Ordner mit
+`.plk`-Dateien ausgewaehlt werden. Links steht ein Projektbaum mit
+Unterordnern. Der aktive `.plk`-Eintrag ist die Quelle fuer **Check**, **Run**,
+**Compile** und die Backend-Ausgaben.
 
-Useful command input examples:
+Bei nummerierten Quellgruppen wie `00_types.plk` bis `04_calculator.plk`
+laedt PlankaStarten die vorhergehenden Dateien derselben Serie mit. So kann
+eine spaetere Datei Prozeduren aus den frueheren Dateien verwenden, ohne dass
+unabhaengige Skizzen oder Testdateien in den Kontext gezogen werden.
+
+Nuetzliche Eingaben im Befehlsfeld:
 
 ```text
 check
 run start
 run max3 4 9 7
+compile
 format
+save
 bytecode
 ir
 evidence
 cgen
 asmgen
 asm8086
-save
 ```
 
-Generated files are written under `build\`.
+`compile` erkennt das Profil der aktiven `.plk`-Datei. Normale Prozedurdateien
+werden als Konsolenprogramme gebaut. GUI- und Cube-Profile werden als
+Windows-GUI-Programme gebaut und aus der grafischen Anwendung direkt gestartet.
 
-## CLI
+## Kommandozeile
 
 ```bat
 build\plankastarten_cli.exe check examples\max3.plk
 build\plankastarten_cli.exe list examples\max3.plk
 build\plankastarten_cli.exe run examples\max3.plk start
+build\plankastarten_cli.exe run a.plk b.plk -- start
+build\plankastarten_cli.exe compile examples\max3.plk
 build\plankastarten_cli.exe evidence examples\max3.plk build\max3.evidence.json
 ```
 
-## API Boundary
+## Windows
 
-PlankaStarten uses these public functions:
+Die grafische Oberflaeche ist eine direkte Win32-C-Anwendung. Der Build bleibt
+nah an klassischen Windows-Controls und kann mit einem passenden Toolchain auch
+fuer aeltere Windows-Ziele gebaut werden. Hinweise fuer XP-orientierte Builds
+stehen in [docs/windows_xp.md](docs/windows_xp.md).
+
+## API-Grenze
+
+PlankaStarten nutzt unter anderem:
 
 ```text
 plankac_create
@@ -107,5 +144,102 @@ plankac_context_write_asm8086_runtime
 plankac_format
 ```
 
-That keeps this repository useful as an embedding example: it shows how a C
-program can host PlankaC without depending on PlankaC internal headers.
+Damit bleibt die Grenze sauber: PlankaStarten ist Host und Werkzeugoberflaeche;
+PlankaC bleibt Sprachkern, Loader, Runtime und Backend-Schicht. Der native
+Compile-Befehl bleibt an derselben Grenze: PlankaC erzeugt die
+Sprachartefakte, PlankaStarten waehlt das passende Host-Profil und ruft den
+lokalen C-Compiler auf.
+
+---
+
+# English
+
+PlankaStarten is a standalone C application for loading, checking, running and
+compiling `.plk` files through the public PlankaC API.
+
+The language core is maintained in
+[Olegie/PlankaC](https://github.com/Olegie/PlankaC). PlankaStarten is the
+workbench and embedding example built around that API.
+
+It is not a second interpreter and not a command-line wrapper. It links
+`libplankac.a`, includes `plankac.h`, creates a `PLANKAC_CONTEXT`, and calls the
+PlankaC API directly.
+
+## Purpose
+
+PlankaStarten demonstrates how a normal C program can embed PlankaC as a
+library:
+
+- load `.plk` files from a workspace folder and its subfolders
+- inspect procedures
+- edit and save source with line numbers and cursor position
+- run procedures with arguments
+- write bytecode, IR, Evidence JSON, C, x86-64 ASM and 8086 ASM
+- build native executables
+- show output in a simple console panel
+
+The graphical application is intentionally direct and technical: project tree
+on the left, editor in the center, procedures and arguments on the right,
+command input and output at the bottom.
+
+## Build
+
+Set `PLANKAC_ROOT` if PlankaC is not located at `..\PlankaMath`:
+
+```bat
+set PLANKAC_ROOT=C:\Users\Admin\Downloads\PlankaMath
+build.bat
+```
+
+The build creates:
+
+```text
+build\PlankaStarten.exe
+build\plankastarten_cli.exe
+```
+
+## GUI
+
+```bat
+build\PlankaStarten.exe
+```
+
+The default workspace is `examples\`. Use **Open** to choose another folder
+with `.plk` files. The left panel is a project tree with subfolders. The
+selected `.plk` file is used by **Check**, **Run**, **Compile**, and backend
+output commands.
+
+Useful command input:
+
+```text
+check
+run start
+run max3 4 9 7
+compile
+format
+save
+bytecode
+ir
+evidence
+cgen
+asmgen
+asm8086
+```
+
+`compile` detects the active source profile. Console procedure sets become
+console executables. GUI and cube profiles become Windows GUI executables.
+
+## CLI
+
+```bat
+build\plankastarten_cli.exe check examples\max3.plk
+build\plankastarten_cli.exe list examples\max3.plk
+build\plankastarten_cli.exe run examples\max3.plk start
+build\plankastarten_cli.exe run a.plk b.plk -- start
+build\plankastarten_cli.exe compile examples\max3.plk
+```
+
+## Boundary
+
+PlankaStarten is the host and tool surface. PlankaC remains the language core,
+loader, runtime, type/checking layer and backend layer.

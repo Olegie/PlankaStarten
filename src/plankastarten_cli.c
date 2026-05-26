@@ -3,6 +3,7 @@
 #include <string.h>
 
 #include "plankac.h"
+#include "plankastarten_compile.h"
 
 static void ps_format_results(const PLANKAC_RESULT *result)
 {
@@ -177,6 +178,39 @@ static int ps_cmd_write(int count, char **paths, const char *kind,
     return 0;
 }
 
+static int ps_cmd_compile(const char *path)
+{
+    PLANKAC_CONTEXT *ctx;
+    PSC_COMPILE_RESULT result;
+    char err[512];
+    const char *sources[2];
+
+    ctx = plankac_create();
+    if (ctx == 0) {
+        printf("PlankaStarten: cannot create PlankaC context\n");
+        return 1;
+    }
+    sources[0] = path;
+    sources[1] = 0;
+    if (!plankac_context_load_sources(ctx, sources, err, sizeof(err))) {
+        printf("load failed: %s\n", err);
+        plankac_destroy(ctx);
+        return 1;
+    }
+    if (!psc_compile_plk(ctx, path, &result, err, sizeof(err))) {
+        printf("compile failed: %s\n", err);
+        printf("compile log: %s\n", result.log_path);
+        plankac_destroy(ctx);
+        return 1;
+    }
+    printf("%s exe: %s\n",
+        result.kind == PSC_COMPILE_GUI ? "GUI" : "console",
+        result.exe_path);
+    printf("compile log: %s\n", result.log_path);
+    plankac_destroy(ctx);
+    return 0;
+}
+
 static void ps_usage(void)
 {
     printf("PlankaStarten API runner for .plk files\n");
@@ -184,6 +218,8 @@ static void ps_usage(void)
     printf("  plankastarten_cli check <file.plk> [more.plk...]\n");
     printf("  plankastarten_cli list <file.plk> [more.plk...]\n");
     printf("  plankastarten_cli run <file.plk> <procedure> [args...]\n");
+    printf("  plankastarten_cli run <file.plk> [more.plk...] -- <procedure> [args...]\n");
+    printf("  plankastarten_cli compile <file.plk>\n");
     printf("  plankastarten_cli bytecode <file.plk> <out.pbc>\n");
     printf("  plankastarten_cli ir <file.plk> <out.ir>\n");
     printf("  plankastarten_cli evidence <file.plk> <out.json>\n");
@@ -205,11 +241,26 @@ int main(int argc, char **argv)
         return ps_cmd_list(argc - 2, argv + 2);
     }
     if (strcmp(argv[1], "run") == 0) {
+        int sep;
+
         if (argc < 4) {
             ps_usage();
             return 1;
         }
+        for (sep = 2; sep < argc; ++sep) {
+            if (strcmp(argv[sep], "--") == 0) {
+                if (sep == 2 || sep + 1 >= argc) {
+                    ps_usage();
+                    return 1;
+                }
+                return ps_cmd_run(sep - 2, argv + 2, argv[sep + 1],
+                    argc - sep - 2, argv + sep + 2);
+            }
+        }
         return ps_cmd_run(1, argv + 2, argv[3], argc - 4, argv + 4);
+    }
+    if (strcmp(argv[1], "compile") == 0) {
+        return ps_cmd_compile(argv[2]);
     }
     if (strcmp(argv[1], "bytecode") == 0 || strcmp(argv[1], "ir") == 0
             || strcmp(argv[1], "evidence") == 0

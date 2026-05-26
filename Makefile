@@ -1,7 +1,7 @@
 PLANKAC_ROOT ?= ../PlankaMath
 CC ?= gcc
 CFLAGS ?= -Wall -Wextra -std=c99
-CPPFLAGS += -I$(PLANKAC_ROOT)/c/include
+CPPFLAGS += -DWINVER=0x0501 -D_WIN32_WINNT=0x0501 -I$(PLANKAC_ROOT)/c/include
 LDLIBS ?= -lm
 BUILD := build
 
@@ -15,8 +15,8 @@ $(BUILD):
 $(PLANKAC_ROOT)/build/libplankac.a:
 	$(MAKE) -C $(PLANKAC_ROOT) all
 
-$(BUILD)/plankastarten_cli: src/plankastarten_cli.c $(PLANKAC_ROOT)/build/libplankac.a | $(BUILD)
-	$(CC) $(CPPFLAGS) $(CFLAGS) src/plankastarten_cli.c $(PLANKAC_ROOT)/build/libplankac.a -o $@ $(LDLIBS)
+$(BUILD)/plankastarten_cli: src/plankastarten_cli.c src/plankastarten_compile.c $(PLANKAC_ROOT)/build/libplankac.a | $(BUILD)
+	$(CC) $(CPPFLAGS) $(CFLAGS) src/plankastarten_cli.c src/plankastarten_compile.c $(PLANKAC_ROOT)/build/libplankac.a -o $@ $(LDLIBS)
 
 check: all
 	$(BUILD)/plankastarten_cli check examples/max3.plk
