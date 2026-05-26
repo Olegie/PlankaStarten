@@ -1,5 +1,7 @@
 # PlankaStarten
 
+German README: [README.de.md](README.de.md)
+
 PlankaStarten is a small C workbench for running and compiling `.plk` files
 through the public PlankaC API.
 
