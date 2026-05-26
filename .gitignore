@@ -1,0 +1,15 @@
+build/
+dist/
+*.o
+*.obj
+*.exe
+*.pdb
+*.ilk
+*.a
+*.lib
+*.dll
+*.pbc
+*.ir
+*.S
+*.asm
+*.json
