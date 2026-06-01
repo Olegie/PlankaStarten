@@ -1,9 +1,210 @@
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "plankac.h"
 #include "plankastarten_compile.h"
+
+#define PS_MAX_CLI_SOURCES 128
+#define PS_MAX_PATH_TEXT 512
+
+static const char *ps_path_leaf(const char *path)
+{
+    const char *leaf;
+    const char *p;
+
+    leaf = path;
+    for (p = path; p != 0 && *p != '\0'; ++p) {
+        if (*p == '\\' || *p == '/') {
+            leaf = p + 1;
+        }
+    }
+    return *leaf == '\0' ? path : leaf;
+}
+
+static void ps_parent_dir(const char *path, char *out, unsigned out_size)
+{
+    char *slash;
+    char *alt;
+
+    if (out_size == 0) {
+        return;
+    }
+    strncpy(out, path != 0 ? path : "", out_size - 1);
+    out[out_size - 1] = '\0';
+    slash = strrchr(out, '\\');
+    alt = strrchr(out, '/');
+    if (alt != 0 && (slash == 0 || alt > slash)) {
+        slash = alt;
+    }
+    if (slash != 0) {
+        *slash = '\0';
+    }
+}
+
+static void ps_join_path(char *out, unsigned out_size, const char *dir,
+    const char *name)
+{
+    unsigned n;
+
+    snprintf(out, out_size, "%s", dir);
+    n = (unsigned)strlen(out);
+    if (n > 0 && out[n - 1] != '\\' && out[n - 1] != '/') {
+        strncat(out, "\\", out_size - strlen(out) - 1);
+    }
+    strncat(out, name, out_size - strlen(out) - 1);
+}
+
+static int ps_path_equal(const char *a, const char *b)
+{
+    if (a == 0 || b == 0) {
+        return 0;
+    }
+    return _stricmp(a, b) == 0;
+}
+
+static int ps_dir_exists(const char *path)
+{
+    DWORD attr;
+
+    attr = GetFileAttributesA(path);
+    return attr != INVALID_FILE_ATTRIBUTES
+        && (attr & FILE_ATTRIBUTE_DIRECTORY) != 0;
+}
+
+static int ps_source_prefix_number(const char *path)
+{
+    const char *name;
+    int value;
+    int digits;
+
+    name = ps_path_leaf(path);
+    value = 0;
+    digits = 0;
+    while (*name >= '0' && *name <= '9') {
+        value = value * 10 + (*name - '0');
+        ++name;
+        ++digits;
+    }
+    if (digits == 0 || *name != '_') {
+        return -1;
+    }
+    return value;
+}
+
+static int ps_add_source(const char **sources, int *count,
+    char storage[][PS_MAX_PATH_TEXT], int *storage_count, const char *path)
+{
+    int i;
+
+    if (sources == 0 || count == 0 || storage == 0 || storage_count == 0
+            || path == 0 || path[0] == '\0') {
+        return 0;
+    }
+    for (i = 0; i < *count; ++i) {
+        if (ps_path_equal(sources[i], path)) {
+            return 1;
+        }
+    }
+    if (*count >= PS_MAX_CLI_SOURCES - 1
+            || *storage_count >= PS_MAX_CLI_SOURCES - 1) {
+        return 0;
+    }
+    strncpy(storage[*storage_count], path, PS_MAX_PATH_TEXT - 1);
+    storage[*storage_count][PS_MAX_PATH_TEXT - 1] = '\0';
+    sources[*count] = storage[*storage_count];
+    *count += 1;
+    *storage_count += 1;
+    return 1;
+}
+
+static void ps_add_numbered_sources_from_disk(const char **sources,
+    int *count, char storage[][PS_MAX_PATH_TEXT], int *storage_count,
+    const char *dir, int max_prefix)
+{
+    WIN32_FIND_DATAA data;
+    HANDLE find;
+    char pattern[PS_MAX_PATH_TEXT];
+    char path[PS_MAX_PATH_TEXT];
+    int prefix;
+
+    for (prefix = 0; prefix <= max_prefix && prefix < 90; ++prefix) {
+        snprintf(pattern, sizeof(pattern), "%s\\%02d_*.plk", dir, prefix);
+        find = FindFirstFileA(pattern, &data);
+        if (find == INVALID_HANDLE_VALUE) {
+            continue;
+        }
+        do {
+            if ((data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0) {
+                ps_join_path(path, sizeof(path), dir, data.cFileName);
+                ps_add_source(sources, count, storage, storage_count, path);
+            }
+        } while (FindNextFileA(find, &data));
+        FindClose(find);
+    }
+}
+
+static int ps_project_root_for_examples(const char *active_dir,
+    char *root, unsigned root_size)
+{
+    char src_dir[PS_MAX_PATH_TEXT];
+
+    if (active_dir == 0 || root == 0 || root_size == 0) {
+        return 0;
+    }
+    if (_stricmp(ps_path_leaf(active_dir), "examples") != 0) {
+        return 0;
+    }
+    ps_parent_dir(active_dir, root, root_size);
+    ps_join_path(src_dir, sizeof(src_dir), root, "src");
+    return ps_dir_exists(src_dir);
+}
+
+static int ps_expand_sources(int count, char **paths, const char **sources,
+    int *source_count, char storage[][PS_MAX_PATH_TEXT])
+{
+    char active_dir[PS_MAX_PATH_TEXT];
+    char project_root[PS_MAX_PATH_TEXT];
+    char project_src[PS_MAX_PATH_TEXT];
+    int active_prefix;
+    int storage_count;
+    int i;
+
+    if (count <= 0 || count >= PS_MAX_CLI_SOURCES) {
+        return 0;
+    }
+    *source_count = 0;
+    storage_count = 0;
+    if (count != 1) {
+        for (i = 0; i < count; ++i) {
+            if (!ps_add_source(sources, source_count, storage,
+                    &storage_count, paths[i])) {
+                return 0;
+            }
+        }
+        sources[*source_count] = 0;
+        return 1;
+    }
+    ps_parent_dir(paths[0], active_dir, sizeof(active_dir));
+    active_prefix = ps_source_prefix_number(paths[0]);
+    if (active_prefix >= 0 && active_prefix < 90) {
+        ps_add_numbered_sources_from_disk(sources, source_count, storage,
+            &storage_count, active_dir, active_prefix);
+    } else if (ps_project_root_for_examples(active_dir, project_root,
+            sizeof(project_root))) {
+        ps_join_path(project_src, sizeof(project_src), project_root, "src");
+        ps_add_numbered_sources_from_disk(sources, source_count, storage,
+            &storage_count, project_src, 89);
+    }
+    if (!ps_add_source(sources, source_count, storage, &storage_count,
+            paths[0])) {
+        return 0;
+    }
+    sources[*source_count] = 0;
+    return 1;
+}
 
 static void ps_format_results(const PLANKAC_RESULT *result)
 {
@@ -23,17 +224,15 @@ static void ps_format_results(const PLANKAC_RESULT *result)
 static int ps_load_sources(PLANKAC_CONTEXT *ctx, int count, char **paths,
     char *err, unsigned err_size)
 {
-    const char *sources[128];
-    int i;
+    const char *sources[PS_MAX_CLI_SOURCES];
+    char storage[PS_MAX_CLI_SOURCES][PS_MAX_PATH_TEXT];
+    int source_count;
 
-    if (count <= 0 || count >= 128) {
-        snprintf(err, err_size, "expected 1..127 source files");
+    if (!ps_expand_sources(count, paths, sources, &source_count, storage)) {
+        snprintf(err, err_size, "expected 1..%d source files",
+            PS_MAX_CLI_SOURCES - 1);
         return 0;
     }
-    for (i = 0; i < count; ++i) {
-        sources[i] = paths[i];
-    }
-    sources[count] = 0;
     return plankac_context_load_sources(ctx, sources, err, err_size);
 }
 
@@ -183,16 +382,15 @@ static int ps_cmd_compile(const char *path)
     PLANKAC_CONTEXT *ctx;
     PSC_COMPILE_RESULT result;
     char err[512];
-    const char *sources[2];
+    char *sources[1];
 
     ctx = plankac_create();
     if (ctx == 0) {
         printf("PlankaStarten: cannot create PlankaC context\n");
         return 1;
     }
-    sources[0] = path;
-    sources[1] = 0;
-    if (!plankac_context_load_sources(ctx, sources, err, sizeof(err))) {
+    sources[0] = (char *)path;
+    if (!ps_load_sources(ctx, 1, sources, err, sizeof(err))) {
         printf("load failed: %s\n", err);
         plankac_destroy(ctx);
         return 1;

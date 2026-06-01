@@ -83,6 +83,11 @@ Bei nummerierten Quellgruppen wie `00_types.plk` bis `04_calculator.plk`
 laedt PlankaStarten die vorhergehenden Dateien derselben Serie mit. So kann
 eine spaetere Datei Prozeduren aus den frueheren Dateien verwenden, ohne dass
 unabhaengige Skizzen oder Testdateien in den Kontext gezogen werden.
+Liegt eine aktive Datei in einem `examples`-Ordner und existiert daneben ein
+`src`-Ordner, werden die nummerierten Quellen aus diesem `src`-Ordner als
+Projektbibliothek geladen. Ein Beispiel wie `session_guarded.plk` kann dadurch
+`divide_checked` aus `src/01_arithmetic.plk` verwenden, ohne dass die
+Bibliotheksdateien von Hand ausgewaehlt werden muessen.
 
 Nuetzliche Eingaben im Befehlsfeld:
 
@@ -208,6 +213,10 @@ The default workspace is `examples\`. Use **Open** to choose another folder
 with `.plk` files. The left panel is a project tree with subfolders. The
 selected `.plk` file is used by **Check**, **Run**, **Compile**, and backend
 output commands.
+
+For numbered source series, PlankaStarten loads the earlier files from the same
+series. For files inside an `examples` directory, it also loads numbered
+sources from a sibling `src` directory as the project library.
 
 Useful command input:
 
