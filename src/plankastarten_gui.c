@@ -31,6 +31,10 @@
 #define IDC_COMMAND 1008
 #define IDC_CONSOLE 1009
 #define IDC_STATUS 1010
+#define IDC_RESULT 1011
+#define IDC_PROC_LABEL 1015
+#define IDC_ARGS_LABEL 1016
+#define IDC_RESULT_LABEL 1017
 #define IDC_CHECK 1101
 #define IDC_RUN 1102
 #define IDC_LIST 1103
@@ -53,8 +57,12 @@ typedef struct PS_APP {
     HWND line_numbers;
     HWND editor;
     HWND proc_list;
+    HWND proc_label;
     HWND proc_name;
+    HWND args_label;
     HWND args_edit;
+    HWND result_label;
+    HWND result_edit;
     HWND command_edit;
     HWND console;
     HWND status;
@@ -72,6 +80,7 @@ static PS_APP g_app;
 
 static void ps_update_line_numbers(void);
 static void ps_check_project(void);
+static void ps_run_proc(void);
 
 static void ps_set_min_track(MINMAXINFO *mmi)
 {
@@ -178,6 +187,13 @@ static void ps_appendf(const char *fmt, ...)
     ps_append_console(text);
 }
 
+static void ps_set_result(const char *text)
+{
+    if (g_app.result_edit != 0) {
+        SetWindowTextA(g_app.result_edit, text != 0 ? text : "");
+    }
+}
+
 static void ps_join_path(char *out, unsigned out_size, const char *dir,
     const char *name)
 {
@@ -215,6 +231,84 @@ static int ps_read_file(const char *path, char *out, unsigned out_size)
     fclose(f);
     out[n] = '\0';
     return 1;
+}
+
+static char *ps_read_text_alloc(const char *path)
+{
+    FILE *f;
+    long size;
+    char *text;
+    size_t n;
+
+    f = fopen(path, "rb");
+    if (f == 0) {
+        return 0;
+    }
+    if (fseek(f, 0, SEEK_END) != 0) {
+        fclose(f);
+        return 0;
+    }
+    size = ftell(f);
+    if (size < 0) {
+        fclose(f);
+        return 0;
+    }
+    rewind(f);
+    text = (char *)malloc((size_t)size + 1);
+    if (text == 0) {
+        fclose(f);
+        return 0;
+    }
+    n = fread(text, 1, (size_t)size, f);
+    fclose(f);
+    text[n] = '\0';
+    return text;
+}
+
+static void ps_append_file_tail(const char *title, const char *path)
+{
+    char *text;
+    char *line;
+    char *next;
+    int printed;
+
+    text = ps_read_text_alloc(path);
+    if (text == 0 || text[0] == '\0') {
+        free(text);
+        return;
+    }
+    ps_appendf("%s:", title);
+    printed = 0;
+    line = text;
+    while (line != 0 && *line != '\0' && printed < 40) {
+        char *end;
+
+        end = strchr(line, '\n');
+        if (end != 0) {
+            *end = '\0';
+            next = end + 1;
+        } else {
+            next = 0;
+        }
+        while (*line == '\r') {
+            ++line;
+        }
+        if (line[0] != '\0') {
+            unsigned len;
+
+            len = (unsigned)strlen(line);
+            while (len > 0 && (line[len - 1] == '\r'
+                    || line[len - 1] == '\n')) {
+                line[--len] = '\0';
+            }
+            if (line[0] != '\0') {
+                ps_appendf("  %s", line);
+                ++printed;
+            }
+        }
+        line = next;
+    }
+    free(text);
 }
 
 static void ps_to_windows_newlines(const char *in, char *out,
@@ -629,34 +723,159 @@ static int ps_context_load_active(PLANKAC_CONTEXT **ctx_out)
     return 1;
 }
 
-static void ps_select_default_proc(PLANKAC_CONTEXT *ctx)
+static void ps_default_args_for_count(int argc, char *out,
+    unsigned out_size)
 {
-    PLANKAC_PROC_INFO info;
-    char first[PLANKAC_MAX_NAME];
-    char first_zero[PLANKAC_MAX_NAME];
+    int i;
+
+    if (out_size == 0) {
+        return;
+    }
+    out[0] = '\0';
+    for (i = 0; i < argc; ++i) {
+        char value[32];
+
+        snprintf(value, sizeof(value), "%s%d", i == 0 ? "" : " ", i + 1);
+        strncat(out, value, out_size - strlen(out) - 1);
+    }
+}
+
+static void ps_set_run_fields(const PLANKAC_PROC_INFO *info)
+{
+    char args[256];
+    char result[256];
+
+    if (info == 0) {
+        return;
+    }
+    SetWindowTextA(g_app.proc_name, info->name);
+    ps_default_args_for_count(info->argc, args, sizeof(args));
+    SetWindowTextA(g_app.args_edit, args);
+    snprintf(result, sizeof(result), "Ready: P%d %s  (%d -> %d)",
+        info->number, info->name, info->argc, info->results);
+    ps_set_result(result);
+}
+
+static int ps_get_proc_info_by_name(PLANKAC_CONTEXT *ctx, const char *name,
+    PLANKAC_PROC_INFO *info)
+{
+    char numbered[32];
     int i;
     int n;
 
-    first[0] = '\0';
-    first_zero[0] = '\0';
+    if (ctx == 0 || name == 0 || name[0] == '\0' || info == 0) {
+        return 0;
+    }
+    if (plankac_context_find_proc(ctx, name, info)) {
+        return 1;
+    }
     n = plankac_context_proc_count(ctx);
     for (i = 0; i < n; ++i) {
-        if (plankac_context_get_proc(ctx, i, &info)) {
-            if (first[0] == '\0') {
-                strncpy(first, info.name, sizeof(first) - 1);
-                first[sizeof(first) - 1] = '\0';
-            }
-            if (first_zero[0] == '\0' && info.argc == 0) {
-                strncpy(first_zero, info.name, sizeof(first_zero) - 1);
-                first_zero[sizeof(first_zero) - 1] = '\0';
+        if (plankac_context_get_proc(ctx, i, info)) {
+            snprintf(numbered, sizeof(numbered), "P%d", info->number);
+            if (_stricmp(numbered, name) == 0) {
+                return 1;
             }
         }
     }
-    if (first_zero[0] != '\0') {
-        SetWindowTextA(g_app.proc_name, first_zero);
-        SetWindowTextA(g_app.args_edit, "");
-    } else if (first[0] != '\0') {
-        SetWindowTextA(g_app.proc_name, first);
+    return 0;
+}
+
+static int ps_get_selected_proc_info(PLANKAC_CONTEXT *ctx,
+    PLANKAC_PROC_INFO *info)
+{
+    char line[256];
+    char name[128];
+    int sel;
+
+    GetWindowTextA(g_app.proc_name, name, sizeof(name));
+    if (ps_get_proc_info_by_name(ctx, name, info)) {
+        return 1;
+    }
+    sel = (int)SendMessageA(g_app.proc_list, LB_GETCURSEL, 0, 0);
+    if (sel >= 0) {
+        SendMessageA(g_app.proc_list, LB_GETTEXT, sel, (LPARAM)line);
+        name[0] = '\0';
+        sscanf(line, "P%*d %127s", name);
+        if (ps_get_proc_info_by_name(ctx, name, info)) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static void ps_select_default_proc(PLANKAC_CONTEXT *ctx)
+{
+    PLANKAC_PROC_INFO info;
+    PLANKAC_PROC_INFO first;
+    PLANKAC_PROC_INFO first_zero;
+    int i;
+    int n;
+    int have_first;
+    int have_zero;
+    int first_index;
+    int zero_index;
+
+    memset(&first, 0, sizeof(first));
+    memset(&first_zero, 0, sizeof(first_zero));
+    have_first = 0;
+    have_zero = 0;
+    first_index = -1;
+    zero_index = -1;
+    n = plankac_context_proc_count(ctx);
+    for (i = 0; i < n; ++i) {
+        if (plankac_context_get_proc(ctx, i, &info)) {
+            if (!have_first) {
+                first = info;
+                have_first = 1;
+                first_index = i;
+            }
+            if (!have_zero && info.argc == 0) {
+                first_zero = info;
+                have_zero = 1;
+                zero_index = i;
+            }
+        }
+    }
+    if (have_zero) {
+        SendMessageA(g_app.proc_list, LB_SETCURSEL, zero_index, 0);
+        ps_set_run_fields(&first_zero);
+    } else if (have_first) {
+        SendMessageA(g_app.proc_list, LB_SETCURSEL, first_index, 0);
+        ps_set_run_fields(&first);
+    }
+}
+
+static void ps_update_proc_from_list(int run_after_select)
+{
+    PLANKAC_CONTEXT *ctx;
+    PLANKAC_PROC_INFO info;
+    char line[256];
+    char name[128];
+    int sel;
+
+    sel = (int)SendMessageA(g_app.proc_list, LB_GETCURSEL, 0, 0);
+    if (sel < 0) {
+        return;
+    }
+    SendMessageA(g_app.proc_list, LB_GETTEXT, sel, (LPARAM)line);
+    name[0] = '\0';
+    sscanf(line, "P%*d %127s", name);
+    if (name[0] == '\0') {
+        return;
+    }
+    if (!ps_context_load_active(&ctx)) {
+        ps_set_status("Load failed");
+        return;
+    }
+    if (ps_get_proc_info_by_name(ctx, name, &info)) {
+        ps_set_run_fields(&info);
+        ps_set_status(run_after_select ? "Running selected procedure"
+            : "Procedure selected");
+    }
+    plankac_destroy(ctx);
+    if (run_after_select) {
+        ps_run_proc();
     }
 }
 
@@ -715,13 +934,15 @@ static int ps_parse_args(char *text, double *args)
 static void ps_run_proc(void)
 {
     PLANKAC_CONTEXT *ctx;
+    PLANKAC_PROC_INFO info;
     PLANKAC_RESULT result;
     double args[PLANKAC_MAX_ARGS];
     char proc[128];
     char arg_text[256];
+    char default_args[256];
     char err[PS_MAX_LINE];
     char value[64];
-    char line[512];
+    char line[PS_MAX_LINE + 128];
     int argc;
     int i;
 
@@ -729,14 +950,41 @@ static void ps_run_proc(void)
         ps_set_status("Load failed");
         return;
     }
-    GetWindowTextA(g_app.proc_name, proc, sizeof(proc));
+    if (!ps_get_selected_proc_info(ctx, &info)) {
+        ps_append_console("run failed: no procedure selected");
+        ps_set_result("No procedure selected");
+        ps_set_status("Run failed");
+        plankac_destroy(ctx);
+        return;
+    }
+    SetWindowTextA(g_app.proc_name, info.name);
+    strncpy(proc, info.name, sizeof(proc) - 1);
+    proc[sizeof(proc) - 1] = '\0';
     GetWindowTextA(g_app.args_edit, arg_text, sizeof(arg_text));
+    if (arg_text[0] == '\0' && info.argc > 0) {
+        ps_default_args_for_count(info.argc, default_args,
+            sizeof(default_args));
+        SetWindowTextA(g_app.args_edit, default_args);
+        strncpy(arg_text, default_args, sizeof(arg_text) - 1);
+        arg_text[sizeof(arg_text) - 1] = '\0';
+    }
     argc = ps_parse_args(arg_text, args);
+    if (argc != info.argc) {
+        snprintf(line, sizeof(line),
+            "run failed: %s expects %d argument(s), got %d",
+            info.name, info.argc, argc);
+        ps_append_console(line);
+        ps_set_result(line);
+        ps_set_status("Run failed");
+        plankac_destroy(ctx);
+        return;
+    }
     err[0] = '\0';
     if (!plankac_context_run(ctx, proc, args, argc, &result,
             err, sizeof(err))) {
-        ps_appendf("run failed: %s", err);
-        ps_append_console("select a procedure from the right list or type one in the Run field");
+        snprintf(line, sizeof(line), "run failed: %s", err);
+        ps_append_console(line);
+        ps_set_result(line);
         ps_set_status("Run failed");
         plankac_destroy(ctx);
         return;
@@ -753,6 +1001,7 @@ static void ps_run_proc(void)
         }
         strncat(line, value, sizeof(line) - strlen(line) - 1);
     }
+    ps_set_result(line);
     ps_append_console(line);
     ps_set_status("Ran procedure");
     plankac_destroy(ctx);
@@ -834,11 +1083,115 @@ static void ps_write_artifact(const char *kind)
     ps_set_status("Artifact written");
 }
 
+static void ps_cmd_quote(FILE *f, const char *text)
+{
+    fputc('"', f);
+    while (text != 0 && *text != '\0') {
+        if (*text == '"') {
+            fputc('\\', f);
+        }
+        fputc(*text, f);
+        ++text;
+    }
+    fputc('"', f);
+}
+
+static int ps_choose_console_proc(PLANKAC_CONTEXT *ctx, char *proc,
+    unsigned proc_size, char *args, unsigned args_size)
+{
+    PLANKAC_PROC_INFO info;
+    char arg_text[256];
+    int i;
+    int n;
+
+    proc[0] = '\0';
+    args[0] = '\0';
+    if (ps_get_selected_proc_info(ctx, &info)) {
+        strncpy(proc, info.name, proc_size - 1);
+        proc[proc_size - 1] = '\0';
+        GetWindowTextA(g_app.args_edit, arg_text, sizeof(arg_text));
+        if (arg_text[0] == '\0' && info.argc > 0) {
+            ps_default_args_for_count(info.argc, args, args_size);
+        } else {
+            strncpy(args, arg_text, args_size - 1);
+            args[args_size - 1] = '\0';
+        }
+        return 1;
+    }
+    if (plankac_context_find_proc(ctx, "start", &info)) {
+        strncpy(proc, "start", proc_size - 1);
+        proc[proc_size - 1] = '\0';
+        ps_default_args_for_count(info.argc, args, args_size);
+        return 1;
+    }
+    n = plankac_context_proc_count(ctx);
+    for (i = 0; i < n; ++i) {
+        if (plankac_context_get_proc(ctx, i, &info) && info.argc == 0) {
+            strncpy(proc, info.name, proc_size - 1);
+            proc[proc_size - 1] = '\0';
+            return 1;
+        }
+    }
+    if (n > 0 && plankac_context_get_proc(ctx, 0, &info)) {
+        strncpy(proc, info.name, proc_size - 1);
+        proc[proc_size - 1] = '\0';
+        ps_default_args_for_count(info.argc, args, args_size);
+        return 1;
+    }
+    return 0;
+}
+
+static int ps_write_console_launcher(const PSC_COMPILE_RESULT *result,
+    const char *proc, const char *args, char *cmd_path, unsigned cmd_size)
+{
+    FILE *f;
+    char cwd[PS_MAX_PATH_TEXT];
+    char name[PS_MAX_PATH_TEXT];
+    char *dot;
+
+    if (result == 0 || result->exe_path[0] == '\0'
+            || proc == 0 || proc[0] == '\0') {
+        return 0;
+    }
+    strncpy(name, ps_path_leaf(result->exe_path), sizeof(name) - 1);
+    name[sizeof(name) - 1] = '\0';
+    dot = strrchr(name, '.');
+    if (dot != 0) {
+        *dot = '\0';
+    }
+    strncat(name, "_run.cmd", sizeof(name) - strlen(name) - 1);
+    ps_make_build_path(cmd_path, cmd_size, name);
+    GetCurrentDirectoryA(sizeof(cwd), cwd);
+    f = fopen(cmd_path, "wb");
+    if (f == 0) {
+        return 0;
+    }
+    fprintf(f, "@echo off\r\n");
+    fprintf(f, "cd /d ");
+    ps_cmd_quote(f, cwd);
+    fprintf(f, "\r\n");
+    fprintf(f, "echo PlankaStarten run: %s\r\n", proc);
+    ps_cmd_quote(f, result->exe_path);
+    fprintf(f, " %s", proc);
+    if (args != 0 && args[0] != '\0') {
+        fprintf(f, " %s", args);
+    }
+    fprintf(f, "\r\n");
+    fprintf(f, "echo.\r\n");
+    fprintf(f, "echo Exit code: %%ERRORLEVEL%%\r\n");
+    fprintf(f, "pause\r\n");
+    fclose(f);
+    return 1;
+}
+
 static void ps_compile_active(void)
 {
     PLANKAC_CONTEXT *ctx;
     PSC_COMPILE_RESULT result;
     char err[PS_MAX_LINE];
+    char run_proc[128];
+    char run_args[256];
+    char launcher[PS_MAX_PATH_TEXT];
     HINSTANCE launched;
 
     if (g_app.selected_file < 0 || g_app.selected_file >= g_app.file_count) {
@@ -851,11 +1204,17 @@ static void ps_compile_active(void)
         ps_set_status("Compile failed");
         return;
     }
+    if (!ps_choose_console_proc(ctx, run_proc, sizeof(run_proc),
+            run_args, sizeof(run_args))) {
+        strcpy(run_proc, "start");
+        run_args[0] = '\0';
+    }
     err[0] = '\0';
     if (!psc_compile_plk(ctx, g_app.files[g_app.selected_file],
             &result, err, sizeof(err))) {
         ps_appendf("compile failed: %s", err);
         ps_appendf("compile log: %s", result.log_path);
+        ps_append_file_tail("compile output", result.log_path);
         ps_set_status("Compile failed");
         plankac_destroy(ctx);
         return;
@@ -874,9 +1233,25 @@ static void ps_compile_active(void)
         }
     } else {
         ps_appendf("compiled console exe: %s", result.exe_path);
-        ps_appendf("run it like: %s start", result.exe_path);
         ps_appendf("compile log: %s", result.log_path);
-        ps_set_status("Compiled console exe");
+        if (ps_write_console_launcher(&result, run_proc, run_args,
+                launcher, sizeof(launcher))) {
+            ps_appendf("launcher written: %s", launcher);
+            launched = ShellExecuteA(g_app.hwnd, "open", launcher,
+                "", "", SW_SHOWNORMAL);
+            if ((INT_PTR)launched <= 32) {
+                ps_appendf("run manually: %s", launcher);
+                ps_set_status("Compiled console exe");
+            } else {
+                ps_appendf("launched console: %s %s %s",
+                    result.exe_path, run_proc, run_args);
+                ps_set_status("Compiled and launched console exe");
+            }
+        } else {
+            ps_appendf("run manually: %s %s %s",
+                result.exe_path, run_proc, run_args);
+            ps_set_status("Compiled console exe");
+        }
     }
 }
 
@@ -972,6 +1347,18 @@ static HWND ps_edit(HWND parent, int id, DWORD extra_style)
     return hwnd;
 }
 
+static HWND ps_label(HWND parent, const char *text, int id)
+{
+    HWND hwnd;
+
+    hwnd = CreateWindowExA(0, "STATIC", text,
+        WS_CHILD | WS_VISIBLE,
+        0, 0, 100, 18, parent, (HMENU)(INT_PTR)id,
+        GetModuleHandleA(0), 0);
+    SendMessageA(hwnd, WM_SETFONT, (WPARAM)g_app.ui_font, TRUE);
+    return hwnd;
+}
+
 static void ps_layout(HWND hwnd)
 {
     RECT rc;
@@ -999,7 +1386,7 @@ static void ps_layout(HWND hwnd)
     h = rc.bottom - rc.top;
     top = 8;
     left_w = 220;
-    right_w = 240;
+    right_w = 252;
     console_h = 150;
     mid_x = left_w + 16;
     gutter_w = 54;
@@ -1055,16 +1442,24 @@ static void ps_layout(HWND hwnd)
         gutter_w, editor_h, TRUE);
     MoveWindow(g_app.editor, editor_x + gutter_w - 1, editor_y,
         editor_w - gutter_w + 1, editor_h, TRUE);
-    proc_h = work_h / 2;
+    proc_h = work_h - 146;
     if (proc_h < 120) {
         proc_h = 120;
     }
     MoveWindow(g_app.proc_list, w - right_w - 8, editor_y,
         right_w, proc_h, TRUE);
+    MoveWindow(g_app.proc_label, w - right_w - 8,
+        editor_y + proc_h + 8, right_w, 18, TRUE);
     MoveWindow(g_app.proc_name, w - right_w - 8,
-        editor_y + proc_h + 12, right_w, 24, TRUE);
+        editor_y + proc_h + 28, right_w, 24, TRUE);
+    MoveWindow(g_app.args_label, w - right_w - 8,
+        editor_y + proc_h + 58, right_w, 18, TRUE);
     MoveWindow(g_app.args_edit, w - right_w - 8,
-        editor_y + proc_h + 42, right_w, 24, TRUE);
+        editor_y + proc_h + 78, right_w, 24, TRUE);
+    MoveWindow(g_app.result_label, w - right_w - 8,
+        editor_y + proc_h + 108, right_w, 18, TRUE);
+    MoveWindow(g_app.result_edit, w - right_w - 8,
+        editor_y + proc_h + 128, right_w, 26, TRUE);
     MoveWindow(g_app.command_edit, 8, command_y, w - 96, 24, TRUE);
     MoveWindow(GetDlgItem(hwnd, IDC_EXEC), w - 84, command_y, 76, 24, TRUE);
     MoveWindow(g_app.console, 8, h - console_h,
@@ -1107,8 +1502,12 @@ static void ps_create_controls(HWND hwnd)
         0, 0, 100, 100, hwnd, (HMENU)(INT_PTR)IDC_PROC_LIST,
         GetModuleHandleA(0), 0);
     SendMessageA(g_app.proc_list, WM_SETFONT, (WPARAM)g_app.font, TRUE);
+    g_app.proc_label = ps_label(hwnd, "Procedure", IDC_PROC_LABEL);
     g_app.proc_name = ps_edit(hwnd, IDC_PROC_NAME, 0);
+    g_app.args_label = ps_label(hwnd, "Arguments", IDC_ARGS_LABEL);
     g_app.args_edit = ps_edit(hwnd, IDC_ARGS, 0);
+    g_app.result_label = ps_label(hwnd, "Result", IDC_RESULT_LABEL);
+    g_app.result_edit = ps_edit(hwnd, IDC_RESULT, ES_READONLY);
     g_app.command_edit = ps_edit(hwnd, IDC_COMMAND, 0);
     g_app.console = ps_edit(hwnd, IDC_CONSOLE,
         ES_MULTILINE | ES_AUTOVSCROLL | ES_READONLY | WS_VSCROLL);
@@ -1178,17 +1577,9 @@ static LRESULT CALLBACK ps_wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         if (id == IDC_LOAD_DIR) {
             ps_select_folder();
         } else if (id == IDC_PROC_LIST && code == LBN_SELCHANGE) {
-            char line[256];
-            char name[128];
-            int sel;
-
-            sel = (int)SendMessageA(g_app.proc_list, LB_GETCURSEL, 0, 0);
-            if (sel >= 0) {
-                SendMessageA(g_app.proc_list, LB_GETTEXT, sel, (LPARAM)line);
-                name[0] = '\0';
-                sscanf(line, "P%*d %127s", name);
-                SetWindowTextA(g_app.proc_name, name);
-            }
+            ps_update_proc_from_list(0);
+        } else if (id == IDC_PROC_LIST && code == LBN_DBLCLK) {
+            ps_update_proc_from_list(1);
         } else if (id == IDC_EDITOR && code == EN_CHANGE) {
             ps_update_line_numbers();
         } else if (id == IDC_EDITOR && code == EN_VSCROLL) {
