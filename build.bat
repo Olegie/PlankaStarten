@@ -39,7 +39,7 @@ echo Building PlankaStarten GUI...
 windres src\plankastarten.rc -O coff -o build\plankastarten_res.o
 if errorlevel 1 exit /b 1
 
-gcc -Wall -Wextra -std=c99 %PS_DEFS% %PS_INC% src\plankastarten_gui.c src\plankastarten_compile.c build\plankastarten_res.o %PS_LIB% -o build\PlankaStarten.exe %PS_WINDOWS_LD% -lcomctl32 -lcomdlg32 -lshell32 -lole32 -lgdi32 -lm
+gcc -Wall -Wextra -std=c99 %PS_DEFS% %PS_INC% src\plankastarten_gui.c src\plankastarten_gui_i18n.c src\plankastarten_gui_menu.c src\plankastarten_gui_popup.c src\plankastarten_gui_theme.c src\plankastarten_compile.c build\plankastarten_res.o %PS_LIB% -o build\PlankaStarten.exe %PS_WINDOWS_LD% -lcomctl32 -lcomdlg32 -lshell32 -lole32 -lgdi32 -lm
 if errorlevel 1 exit /b 1
 
 echo Running API smoke tests...

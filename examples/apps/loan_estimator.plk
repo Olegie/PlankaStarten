@@ -1,0 +1,24 @@
+# Console application example: simple loan estimate.
+# V0 = principal, V1 = interest rate as fraction, V2 = months.
+# Example: V0=12000, V1=0.06, V2=60.
+# Compile it and run the generated exe without arguments to get prompts.
+
+P800 loan_total (V0[:32.16], V1[:32.16], V2[:32.16]) => R0[:32.16]
+(V0[:32.16] * V1[:32.16]) => Z1[:32.16]
+(V0[:32.16] + Z1[:32.16]) => R0[:32.16]
+END
+
+P801 loan_monthly (V0[:32.16], V1[:32.16], V2[:32.16]) => R0[:32.16]
+loan_total(V0[:32.16], V1[:32.16], V2[:32.16]) => Z1[:32.16]
+(Z1[:32.16] / V2[:32.16]) => R0[:32.16]
+END
+
+P802 loan_interest (V0[:32.16], V1[:32.16], V2[:32.16]) => R0[:32.16]
+loan_total(V0[:32.16], V1[:32.16], V2[:32.16]) => Z1[:32.16]
+(Z1[:32.16] - V0[:32.16]) => R0[:32.16]
+END
+
+P803 start (V0[:32.16], V1[:32.16], V2[:32.16]) => R0[:32.16]
+loan_monthly(V0[:32.16], V1[:32.16], V2[:32.16]) => R0[:32.16]
+END
+

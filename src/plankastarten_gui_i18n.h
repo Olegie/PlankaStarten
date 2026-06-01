@@ -1,0 +1,48 @@
+#ifndef PLANKASTARTEN_GUI_I18N_H
+#define PLANKASTARTEN_GUI_I18N_H
+
+typedef enum PST_LANG {
+    PST_LANG_EN = 0,
+    PST_LANG_DE = 1
+} PST_LANG;
+
+typedef enum PST_TEXT {
+    PST_T_SUBTITLE = 0,
+    PST_T_WORKSPACE,
+    PST_T_SOURCE,
+    PST_T_BACKENDS,
+    PST_T_PROJECT,
+    PST_T_EDITOR,
+    PST_T_PROCEDURES,
+    PST_T_COMMAND,
+    PST_T_OUTPUT,
+    PST_T_PROCEDURE,
+    PST_T_ARGUMENTS,
+    PST_T_RESULT,
+    PST_T_OPEN,
+    PST_T_SAVE,
+    PST_T_FORMAT,
+    PST_T_CHECK,
+    PST_T_RUN,
+    PST_T_COMPILE,
+    PST_T_CLEAR,
+    PST_T_EXEC,
+    PST_T_STATUS_READY,
+    PST_T_SELECT_FOLDER,
+    PST_T_ABOUT_TITLE,
+    PST_T_ABOUT_BODY,
+    PST_T_COMMANDS_TITLE,
+    PST_T_COMMANDS_BODY,
+    PST_T_SEARCH_TITLE,
+    PST_T_SEARCH_LABEL,
+    PST_T_FIND,
+    PST_T_PROC_LIST,
+    PST_T_LANG_EN,
+    PST_T_LANG_DE,
+    PST_T_COUNT
+} PST_TEXT;
+
+const char *pst_text(PST_LANG lang, PST_TEXT text);
+const char *pst_language_name(PST_LANG lang);
+
+#endif

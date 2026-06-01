@@ -1,0 +1,12 @@
+# Console application example: 2D vector length squared.
+# V0 = x, V1 = y.
+
+P820 vector_length2 (V0[:32.16], V1[:32.16]) => R0[:32.16]
+(V0[:32.16] * V0[:32.16]) => Z1[:32.16]
+(V1[:32.16] * V1[:32.16]) => Z2[:32.16]
+(Z1[:32.16] + Z2[:32.16]) => R0[:32.16]
+END
+
+P821 start (V0[:32.16], V1[:32.16]) => R0[:32.16]
+vector_length2(V0[:32.16], V1[:32.16]) => R0[:32.16]
+END

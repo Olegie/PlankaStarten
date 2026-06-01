@@ -11,6 +11,11 @@
 
 #include "plankac.h"
 #include "plankastarten_compile.h"
+#include "plankastarten_gui_i18n.h"
+#include "plankastarten_gui_ids.h"
+#include "plankastarten_gui_menu.h"
+#include "plankastarten_gui_popup.h"
+#include "plankastarten_gui_theme.h"
 
 #define PS_MAX_FILES 512
 #define PS_MAX_PATH_TEXT 512
@@ -20,38 +25,23 @@
 #define PS_MIN_WINDOW_H 620
 #define PS_MAX_TREE_DEPTH 24
 
-#define IDC_WORKSPACE 1001
-#define IDC_LOAD_DIR 1002
-#define IDC_FILE_LIST 1003
-#define IDC_EDITOR 1004
-#define IDC_LINE_NUMBERS 1013
-#define IDC_PROC_LIST 1005
-#define IDC_PROC_NAME 1006
-#define IDC_ARGS 1007
-#define IDC_COMMAND 1008
-#define IDC_CONSOLE 1009
-#define IDC_STATUS 1010
-#define IDC_RESULT 1011
-#define IDC_PROC_LABEL 1015
-#define IDC_ARGS_LABEL 1016
-#define IDC_RESULT_LABEL 1017
-#define IDC_CHECK 1101
-#define IDC_RUN 1102
-#define IDC_LIST 1103
-#define IDC_SAVE 1104
-#define IDC_BYTECODE 1105
-#define IDC_IR 1106
-#define IDC_EVIDENCE 1107
-#define IDC_CGEN 1108
-#define IDC_ASMGEN 1109
-#define IDC_ASM8086 1110
-#define IDC_CLEAR 1111
-#define IDC_EXEC 1112
-#define IDC_FORMAT 1113
-#define IDC_COMPILE 1114
-
 typedef struct PS_APP {
     HWND hwnd;
+    HWND top_band;
+    HWND title;
+    HWND subtitle;
+    HWND menu_bar;
+    PST_MENU_HANDLES menus;
+    PST_POPUP popup;
+    HWND workspace_label;
+    HWND tool_panel;
+    HWND source_group;
+    HWND backend_group;
+    HWND project_label;
+    HWND editor_label;
+    HWND procs_label;
+    HWND command_label;
+    HWND output_label;
     HWND workspace_edit;
     HWND file_tree;
     HWND line_numbers;
@@ -66,13 +56,13 @@ typedef struct PS_APP {
     HWND command_edit;
     HWND console;
     HWND status;
-    HFONT font;
-    HFONT ui_font;
+    PST_THEME theme;
     char workspace[PS_MAX_PATH_TEXT];
     char files[PS_MAX_FILES][PS_MAX_PATH_TEXT];
     int file_count;
     int selected_file;
     int loading_tree;
+    PST_LANG lang;
     HTREEITEM first_file_item;
 } PS_APP;
 
@@ -81,6 +71,11 @@ static PS_APP g_app;
 static void ps_update_line_numbers(void);
 static void ps_check_project(void);
 static void ps_run_proc(void);
+static void ps_save_current(void);
+static void ps_write_artifact(const char *kind);
+static void ps_compile_active(void);
+static void ps_select_folder(void);
+static void ps_apply_language(void);
 
 static void ps_set_min_track(MINMAXINFO *mmi)
 {
@@ -133,6 +128,10 @@ static void ps_update_cursor_status(void)
     int line_start;
     int col;
     char text[256];
+    const char *ready;
+    const char *line_word;
+    const char *col_word;
+    const char *source_word;
 
     if (g_app.editor == 0) {
         return;
@@ -142,9 +141,15 @@ static void ps_update_cursor_status(void)
     line = (int)SendMessageA(g_app.editor, EM_LINEFROMCHAR, pos, 0);
     line_start = (int)SendMessageA(g_app.editor, EM_LINEINDEX, line, 0);
     col = pos - line_start;
+    ready = g_app.lang == PST_LANG_DE ? "Bereit" : "Ready";
+    line_word = g_app.lang == PST_LANG_DE ? "Zl" : "Ln";
+    col_word = g_app.lang == PST_LANG_DE ? "Sp" : "Col";
+    source_word = g_app.lang == PST_LANG_DE
+        ? "PLK-Quelle via PlankaC-API"
+        : "PLK source via PlankaC API";
     snprintf(text, sizeof(text),
-        "Ready  |  Ln %d, Col %d  |  PLK source via PlankaC API",
-        line + 1, col + 1);
+        "%s  |  %s %d, %s %d  |  %s",
+        ready, line_word, line + 1, col_word, col + 1, source_word);
     ps_set_status(text);
 }
 
@@ -231,6 +236,44 @@ static int ps_read_file(const char *path, char *out, unsigned out_size)
     fclose(f);
     out[n] = '\0';
     return 1;
+}
+
+static int ps_text_has_executable_source(const char *text)
+{
+    const char *p;
+
+    p = text;
+    while (p != 0 && *p != '\0') {
+        while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') {
+            ++p;
+        }
+        if (*p == '#') {
+            while (*p != '\0' && *p != '\n') {
+                ++p;
+            }
+            continue;
+        }
+        if (p[0] == 'P' && p[1] >= '0' && p[1] <= '9') {
+            return 1;
+        }
+        if (strncmp(p, "PAGE", 4) == 0 || strncmp(p, "PROC", 4) == 0) {
+            return 1;
+        }
+        while (*p != '\0' && *p != '\n') {
+            ++p;
+        }
+    }
+    return 0;
+}
+
+static int ps_file_has_executable_source(const char *path)
+{
+    char text[PS_MAX_TEXT];
+
+    if (!ps_read_file(path, text, sizeof(text))) {
+        return 0;
+    }
+    return ps_text_has_executable_source(text);
 }
 
 static char *ps_read_text_alloc(const char *path)
@@ -816,6 +859,11 @@ static int ps_context_load_active(PLANKAC_CONTEXT **ctx_out)
         ps_append_console("no active .plk file");
         return 0;
     }
+    if (!ps_file_has_executable_source(g_app.files[g_app.selected_file])) {
+        ps_appendf("document only: %s", g_app.files[g_app.selected_file]);
+        ps_append_console("select a source file with P... procedures or PAGE blocks to run");
+        return 0;
+    }
     ctx = plankac_create();
     if (ctx == 0) {
         ps_append_console("cannot create PlankaC context");
@@ -933,45 +981,74 @@ static int ps_get_selected_proc_info(PLANKAC_CONTEXT *ctx,
     return 0;
 }
 
+static int ps_name_ends_with(const char *text, const char *suffix)
+{
+    unsigned a;
+    unsigned b;
+
+    if (text == 0 || suffix == 0) {
+        return 0;
+    }
+    a = (unsigned)strlen(text);
+    b = (unsigned)strlen(suffix);
+    return a >= b && _stricmp(text + a - b, suffix) == 0;
+}
+
+static int ps_proc_score(const PLANKAC_PROC_INFO *info)
+{
+    int score;
+
+    if (info == 0) {
+        return -1000000;
+    }
+    if (_stricmp(info->name, "type_sheet") == 0) {
+        return -1000000;
+    }
+    score = info->number;
+    if (_stricmp(info->name, "start") == 0) {
+        score += 100000;
+    } else if (_stricmp(info->name, "main") == 0) {
+        score += 95000;
+    } else if (strstr(info->name, "_app") != 0) {
+        score += 85000;
+    } else if (ps_name_ends_with(info->name, "_demo")) {
+        score += 75000;
+    } else if (ps_name_ends_with(info->name, "_session")) {
+        score += 65000;
+    }
+    if (info->argc == 0) {
+        score += 500;
+    }
+    return score;
+}
+
 static void ps_select_default_proc(PLANKAC_CONTEXT *ctx)
 {
     PLANKAC_PROC_INFO info;
-    PLANKAC_PROC_INFO first;
-    PLANKAC_PROC_INFO first_zero;
+    PLANKAC_PROC_INFO best;
     int i;
     int n;
-    int have_first;
-    int have_zero;
-    int first_index;
-    int zero_index;
+    int best_index;
+    int best_score;
+    int score;
 
-    memset(&first, 0, sizeof(first));
-    memset(&first_zero, 0, sizeof(first_zero));
-    have_first = 0;
-    have_zero = 0;
-    first_index = -1;
-    zero_index = -1;
+    memset(&best, 0, sizeof(best));
+    best_index = -1;
+    best_score = -1000000;
     n = plankac_context_proc_count(ctx);
     for (i = 0; i < n; ++i) {
         if (plankac_context_get_proc(ctx, i, &info)) {
-            if (!have_first) {
-                first = info;
-                have_first = 1;
-                first_index = i;
-            }
-            if (!have_zero && info.argc == 0) {
-                first_zero = info;
-                have_zero = 1;
-                zero_index = i;
+            score = ps_proc_score(&info);
+            if (score > best_score) {
+                best = info;
+                best_index = i;
+                best_score = score;
             }
         }
     }
-    if (have_zero) {
-        SendMessageA(g_app.proc_list, LB_SETCURSEL, zero_index, 0);
-        ps_set_run_fields(&first_zero);
-    } else if (have_first) {
-        SendMessageA(g_app.proc_list, LB_SETCURSEL, first_index, 0);
-        ps_set_run_fields(&first);
+    if (best_index >= 0) {
+        SendMessageA(g_app.proc_list, LB_SETCURSEL, best_index, 0);
+        ps_set_run_fields(&best);
     }
 }
 
@@ -1034,6 +1111,16 @@ static void ps_check_project(void)
     PLANKAC_CONTEXT *ctx;
     char summary[256];
 
+    if (g_app.selected_file >= 0 && g_app.selected_file < g_app.file_count
+            && !ps_file_has_executable_source(
+                g_app.files[g_app.selected_file])) {
+        SendMessageA(g_app.proc_list, LB_RESETCONTENT, 0, 0);
+        SetWindowTextA(g_app.proc_name, "");
+        SetWindowTextA(g_app.args_edit, "");
+        ps_set_result("Document source: no runnable procedures");
+        ps_set_status("Document source");
+        return;
+    }
     if (!ps_context_load_active(&ctx)) {
         ps_set_status("Load failed");
         return;
@@ -1282,6 +1369,7 @@ static int ps_write_console_launcher(const PSC_COMPILE_RESULT *result,
             || proc == 0 || proc[0] == '\0') {
         return 0;
     }
+    (void)args;
     strncpy(name, ps_path_leaf(result->exe_path), sizeof(name) - 1);
     name[sizeof(name) - 1] = '\0';
     dot = strrchr(name, '.');
@@ -1301,10 +1389,7 @@ static int ps_write_console_launcher(const PSC_COMPILE_RESULT *result,
     fprintf(f, "\r\n");
     fprintf(f, "echo PlankaStarten run: %s\r\n", proc);
     ps_cmd_quote(f, result->exe_path);
-    fprintf(f, " %s", proc);
-    if (args != 0 && args[0] != '\0') {
-        fprintf(f, " %s", args);
-    }
+    fprintf(f, " /interactive %s", proc);
     fprintf(f, "\r\n");
     fprintf(f, "echo.\r\n");
     fprintf(f, "echo Exit code: %%ERRORLEVEL%%\r\n");
@@ -1372,13 +1457,13 @@ static void ps_compile_active(void)
                 ps_appendf("run manually: %s", launcher);
                 ps_set_status("Compiled console exe");
             } else {
-                ps_appendf("launched console: %s %s %s",
-                    result.exe_path, run_proc, run_args);
+                ps_appendf("launched console: %s /interactive %s",
+                    result.exe_path, run_proc);
                 ps_set_status("Compiled and launched console exe");
             }
         } else {
-            ps_appendf("run manually: %s %s %s",
-                result.exe_path, run_proc, run_args);
+            ps_appendf("run manually: %s /interactive %s",
+                result.exe_path, run_proc);
             ps_set_status("Compiled console exe");
         }
     }
@@ -1427,10 +1512,10 @@ static void ps_execute_command(void)
         ps_write_artifact("asmgen");
     } else if (strcmp(verb, "asm8086") == 0) {
         ps_write_artifact("asm8086");
-    } else if (strcmp(verb, "compile") == 0) {
+    } else if (strcmp(verb, "compile") == 0 || strcmp(verb, "app") == 0) {
         ps_compile_active();
     } else {
-        ps_append_console("commands: check, run <proc> [args], compile, format, save, bytecode, ir, evidence, cgen, asmgen, asm8086");
+        ps_append_console("commands: check, run <proc> [args], app, compile, format, save, bytecode, ir, evidence, cgen, asmgen, asm8086");
     }
     SetWindowTextA(g_app.command_edit, "");
 }
@@ -1443,13 +1528,25 @@ static void ps_select_folder(void)
 
     memset(&bi, 0, sizeof(bi));
     bi.hwndOwner = g_app.hwnd;
-    bi.lpszTitle = "Select folder with .plk files";
+    bi.lpszTitle = pst_text(g_app.lang, PST_T_SELECT_FOLDER);
     bi.ulFlags = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE;
     id = SHBrowseForFolderA(&bi);
     if (id != 0 && SHGetPathFromIDListA(id, path)) {
         SetWindowTextA(g_app.workspace_edit, path);
         ps_scan_workspace();
     }
+}
+
+static HWND ps_static(HWND parent, const char *text, int id, DWORD style)
+{
+    HWND hwnd;
+
+    hwnd = CreateWindowExA(0, "STATIC", text,
+        WS_CHILD | WS_VISIBLE | style,
+        0, 0, 100, 18, parent, (HMENU)(INT_PTR)id,
+        GetModuleHandleA(0), 0);
+    SendMessageA(hwnd, WM_SETFONT, (WPARAM)g_app.theme.ui_font, TRUE);
+    return hwnd;
 }
 
 static HWND ps_button(HWND parent, const char *text, int id)
@@ -1460,7 +1557,7 @@ static HWND ps_button(HWND parent, const char *text, int id)
         WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
         0, 0, 80, 24, parent, (HMENU)(INT_PTR)id,
         GetModuleHandleA(0), 0);
-    SendMessageA(hwnd, WM_SETFONT, (WPARAM)g_app.font, TRUE);
+    SendMessageA(hwnd, WM_SETFONT, (WPARAM)g_app.theme.font, TRUE);
     return hwnd;
 }
 
@@ -1472,20 +1569,47 @@ static HWND ps_edit(HWND parent, int id, DWORD extra_style)
         WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL | extra_style,
         0, 0, 100, 24, parent, (HMENU)(INT_PTR)id,
         GetModuleHandleA(0), 0);
-    SendMessageA(hwnd, WM_SETFONT, (WPARAM)g_app.font, TRUE);
+    SendMessageA(hwnd, WM_SETFONT, (WPARAM)g_app.theme.font, TRUE);
     return hwnd;
 }
 
 static HWND ps_label(HWND parent, const char *text, int id)
 {
-    HWND hwnd;
+    return ps_static(parent, text, id, SS_LEFTNOWORDWRAP);
+}
 
-    hwnd = CreateWindowExA(0, "STATIC", text,
-        WS_CHILD | WS_VISIBLE,
-        0, 0, 100, 18, parent, (HMENU)(INT_PTR)id,
-        GetModuleHandleA(0), 0);
-    SendMessageA(hwnd, WM_SETFONT, (WPARAM)g_app.ui_font, TRUE);
-    return hwnd;
+static void ps_set_button_text(int id, PST_TEXT text)
+{
+    SetDlgItemTextA(g_app.hwnd, id, pst_text(g_app.lang, text));
+}
+
+static void ps_apply_language(void)
+{
+    SetWindowTextA(g_app.subtitle, pst_text(g_app.lang, PST_T_SUBTITLE));
+    SetWindowTextA(g_app.workspace_label, pst_text(g_app.lang, PST_T_WORKSPACE));
+    SetWindowTextA(g_app.source_group, pst_text(g_app.lang, PST_T_SOURCE));
+    SetWindowTextA(g_app.backend_group, pst_text(g_app.lang, PST_T_BACKENDS));
+    SetWindowTextA(g_app.project_label, pst_text(g_app.lang, PST_T_PROJECT));
+    SetWindowTextA(g_app.editor_label, pst_text(g_app.lang, PST_T_EDITOR));
+    SetWindowTextA(g_app.procs_label, pst_text(g_app.lang, PST_T_PROCEDURES));
+    SetWindowTextA(g_app.command_label, pst_text(g_app.lang, PST_T_COMMAND));
+    SetWindowTextA(g_app.output_label, pst_text(g_app.lang, PST_T_OUTPUT));
+    SetWindowTextA(g_app.proc_label, pst_text(g_app.lang, PST_T_PROCEDURE));
+    SetWindowTextA(g_app.args_label, pst_text(g_app.lang, PST_T_ARGUMENTS));
+    SetWindowTextA(g_app.result_label, pst_text(g_app.lang, PST_T_RESULT));
+    ps_set_button_text(IDC_LOAD_DIR, PST_T_OPEN);
+    ps_set_button_text(IDC_SAVE, PST_T_SAVE);
+    ps_set_button_text(IDC_FORMAT, PST_T_FORMAT);
+    ps_set_button_text(IDC_CHECK, PST_T_CHECK);
+    ps_set_button_text(IDC_RUN, PST_T_RUN);
+    ps_set_button_text(IDC_COMPILE, PST_T_COMPILE);
+    ps_set_button_text(IDC_CLEAR, PST_T_CLEAR);
+    ps_set_button_text(IDC_EXEC, PST_T_EXEC);
+    pst_menu_apply_language(&g_app.menus, g_app.lang);
+    ps_set_status(pst_text(g_app.lang, PST_T_STATUS_READY));
+    if (g_app.hwnd != 0) {
+        InvalidateRect(g_app.hwnd, 0, TRUE);
+    }
 }
 
 static void ps_layout(HWND hwnd)
@@ -1496,6 +1620,7 @@ static void ps_layout(HWND hwnd)
     int top;
     int left_w;
     int right_w;
+    int gap;
     int mid_x;
     int console_h;
     int editor_x;
@@ -1506,123 +1631,188 @@ static void ps_layout(HWND hwnd)
     int toolbar_y;
     int button_y;
     int bx;
+    int command_label_y;
     int command_y;
+    int output_label_y;
+    int console_y;
     int work_h;
     int proc_h;
+    int result_h;
+    int right_bottom;
+    int right_x;
 
     GetClientRect(hwnd, &rc);
     w = rc.right - rc.left;
     h = rc.bottom - rc.top;
-    top = 8;
-    left_w = 220;
-    right_w = 252;
-    console_h = 150;
-    mid_x = left_w + 16;
+    top = 0;
+    left_w = 226;
+    right_w = 260;
+    gap = 10;
+    console_h = 138;
+    mid_x = 8 + left_w + gap;
     gutter_w = 54;
 
+    MoveWindow(g_app.top_band, 0, 0, w, 26, TRUE);
+    MoveWindow(g_app.title, 14, 3, 210, 20, TRUE);
+    MoveWindow(g_app.subtitle, 236, 5, w - 248, 18, TRUE);
+    MoveWindow(g_app.menu_bar, 0, 26, w, 24, TRUE);
+    pst_menu_layout(&g_app.menus, 30, 18);
+
+    top = 56;
     MoveWindow(g_app.status, 8, top, w - 16, 22, TRUE);
     top += 30;
-    MoveWindow(g_app.workspace_edit, 8, top, left_w - 76, 24, TRUE);
-    MoveWindow(GetDlgItem(hwnd, IDC_LOAD_DIR), left_w - 62, top, 62, 24, TRUE);
+    MoveWindow(g_app.workspace_label, 12, top + 4, 74, 18, TRUE);
+    MoveWindow(g_app.workspace_edit, 90, top, w - 180, 24, TRUE);
+    MoveWindow(GetDlgItem(hwnd, IDC_LOAD_DIR), w - 82, top, 74, 24, TRUE);
     top += 32;
     toolbar_y = top;
-    button_y = toolbar_y + 3;
-    bx = 8;
-    MoveWindow(GetDlgItem(hwnd, IDC_SAVE), bx, button_y, 56, 24, TRUE);
-    bx += 60;
-    MoveWindow(GetDlgItem(hwnd, IDC_FORMAT), bx, button_y, 68, 24, TRUE);
-    bx += 76;
-    MoveWindow(GetDlgItem(hwnd, IDC_CHECK), bx, button_y, 62, 24, TRUE);
-    bx += 66;
-    MoveWindow(GetDlgItem(hwnd, IDC_RUN), bx, button_y, 54, 24, TRUE);
-    bx += 58;
-    MoveWindow(GetDlgItem(hwnd, IDC_COMPILE), bx, button_y, 76, 24, TRUE);
-    bx += 80;
-    MoveWindow(GetDlgItem(hwnd, IDC_LIST), bx, button_y, 54, 24, TRUE);
-
-    bx += 84;
-    MoveWindow(GetDlgItem(hwnd, IDC_BYTECODE), bx, button_y, 50, 24, TRUE);
-    bx += 54;
-    MoveWindow(GetDlgItem(hwnd, IDC_IR), bx, button_y, 42, 24, TRUE);
-    bx += 46;
-    MoveWindow(GetDlgItem(hwnd, IDC_EVIDENCE), bx, button_y, 58, 24, TRUE);
+    MoveWindow(g_app.tool_panel, 8, toolbar_y, w - 16, 40, TRUE);
+    button_y = toolbar_y + 9;
+    bx = 16;
+    MoveWindow(g_app.source_group, bx, button_y, 58, 24, TRUE);
     bx += 64;
-    MoveWindow(GetDlgItem(hwnd, IDC_CGEN), bx, button_y, 38, 24, TRUE);
-    bx += 42;
-    MoveWindow(GetDlgItem(hwnd, IDC_ASMGEN), bx, button_y, 54, 24, TRUE);
-    bx += 58;
-    MoveWindow(GetDlgItem(hwnd, IDC_ASM8086), bx, button_y, 54, 24, TRUE);
-    bx += 62;
-    MoveWindow(GetDlgItem(hwnd, IDC_CLEAR), bx, button_y, 60, 24, TRUE);
+    MoveWindow(GetDlgItem(hwnd, IDC_SAVE), bx, button_y, 52, 24, TRUE);
+    bx += 56;
+    MoveWindow(GetDlgItem(hwnd, IDC_FORMAT), bx, button_y, 62, 24, TRUE);
+    bx += 66;
+    MoveWindow(GetDlgItem(hwnd, IDC_CHECK), bx, button_y, 56, 24, TRUE);
+    bx += 60;
+    MoveWindow(GetDlgItem(hwnd, IDC_RUN), bx, button_y, 48, 24, TRUE);
+    bx += 52;
+    MoveWindow(GetDlgItem(hwnd, IDC_COMPILE), bx, button_y, 70, 24, TRUE);
+    bx += 74;
 
-    top += 34;
-    command_y = h - console_h - 32;
-    work_h = command_y - top - 8;
+    MoveWindow(g_app.backend_group, bx, button_y, 72, 24, TRUE);
+    bx += 78;
+    MoveWindow(GetDlgItem(hwnd, IDC_BYTECODE), bx, button_y, 46, 24, TRUE);
+    bx += 50;
+    MoveWindow(GetDlgItem(hwnd, IDC_IR), bx, button_y, 36, 24, TRUE);
+    bx += 40;
+    MoveWindow(GetDlgItem(hwnd, IDC_EVIDENCE), bx, button_y, 52, 24, TRUE);
+    bx += 56;
+    MoveWindow(GetDlgItem(hwnd, IDC_CGEN), bx, button_y, 34, 24, TRUE);
+    bx += 38;
+    MoveWindow(GetDlgItem(hwnd, IDC_ASMGEN), bx, button_y, 48, 24, TRUE);
+    bx += 52;
+    MoveWindow(GetDlgItem(hwnd, IDC_ASM8086), bx, button_y, 48, 24, TRUE);
+    bx += 52;
+    MoveWindow(GetDlgItem(hwnd, IDC_CLEAR), bx, button_y, 54, 24, TRUE);
+
+    top += 52;
+    command_label_y = h - console_h - 62;
+    command_y = command_label_y + 18;
+    output_label_y = command_y + 30;
+    console_y = output_label_y + 18;
+    work_h = command_label_y - top - 8;
     if (work_h < 160) {
         work_h = 160;
     }
-    MoveWindow(g_app.file_tree, 8, top, left_w, work_h, TRUE);
+    MoveWindow(g_app.project_label, 8, top, left_w, 18, TRUE);
+    MoveWindow(g_app.file_tree, 8, top + 20, left_w, work_h - 20, TRUE);
 
     editor_x = mid_x;
-    editor_y = top;
-    editor_w = w - left_w - right_w - 32;
-    editor_h = work_h;
+    editor_y = top + 20;
+    editor_w = w - left_w - right_w - (gap * 3) - 16;
+    editor_h = work_h - 20;
+    MoveWindow(g_app.editor_label, editor_x, top, editor_w, 18, TRUE);
     MoveWindow(g_app.line_numbers, editor_x, editor_y,
         gutter_w, editor_h, TRUE);
     MoveWindow(g_app.editor, editor_x + gutter_w - 1, editor_y,
         editor_w - gutter_w + 1, editor_h, TRUE);
-    proc_h = work_h - 146;
-    if (proc_h < 120) {
-        proc_h = 120;
+    right_x = w - right_w - 8;
+    MoveWindow(g_app.procs_label, right_x, top, right_w, 18, TRUE);
+    right_bottom = top + work_h;
+    proc_h = work_h - 202;
+    if (proc_h < 96) {
+        proc_h = 96;
     }
-    MoveWindow(g_app.proc_list, w - right_w - 8, editor_y,
+    result_h = right_bottom - (editor_y + proc_h + 128);
+    if (result_h < 30) {
+        result_h = 30;
+        proc_h = right_bottom - editor_y - 128 - result_h;
+        if (proc_h < 80) {
+            proc_h = 80;
+        }
+        result_h = right_bottom - (editor_y + proc_h + 128);
+        if (result_h < 24) {
+            result_h = 24;
+        }
+    }
+    MoveWindow(g_app.proc_list, right_x, editor_y,
         right_w, proc_h, TRUE);
-    MoveWindow(g_app.proc_label, w - right_w - 8,
+    MoveWindow(g_app.proc_label, right_x,
         editor_y + proc_h + 8, right_w, 18, TRUE);
-    MoveWindow(g_app.proc_name, w - right_w - 8,
+    MoveWindow(g_app.proc_name, right_x,
         editor_y + proc_h + 28, right_w, 24, TRUE);
-    MoveWindow(g_app.args_label, w - right_w - 8,
+    MoveWindow(g_app.args_label, right_x,
         editor_y + proc_h + 58, right_w, 18, TRUE);
-    MoveWindow(g_app.args_edit, w - right_w - 8,
+    MoveWindow(g_app.args_edit, right_x,
         editor_y + proc_h + 78, right_w, 24, TRUE);
-    MoveWindow(g_app.result_label, w - right_w - 8,
+    MoveWindow(g_app.result_label, right_x,
         editor_y + proc_h + 108, right_w, 18, TRUE);
-    MoveWindow(g_app.result_edit, w - right_w - 8,
-        editor_y + proc_h + 128, right_w, 26, TRUE);
+    MoveWindow(g_app.result_edit, right_x,
+        editor_y + proc_h + 128, right_w, result_h, TRUE);
+
+    MoveWindow(g_app.command_label, 8, command_label_y, w - 16, 18, TRUE);
     MoveWindow(g_app.command_edit, 8, command_y, w - 96, 24, TRUE);
     MoveWindow(GetDlgItem(hwnd, IDC_EXEC), w - 84, command_y, 76, 24, TRUE);
-    MoveWindow(g_app.console, 8, h - console_h,
-        w - 16, console_h - 8, TRUE);
+    MoveWindow(g_app.output_label, 8, output_label_y, w - 16, 18, TRUE);
+    MoveWindow(g_app.console, 8, console_y,
+        w - 16, h - console_y - 8, TRUE);
 }
 
 static void ps_create_controls(HWND hwnd)
 {
-    g_app.font = CreateFontA(16, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
-        ANSI_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-        DEFAULT_QUALITY, FIXED_PITCH | FF_MODERN, "Consolas");
-    g_app.ui_font = CreateFontA(15, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
-        ANSI_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-        DEFAULT_QUALITY, DEFAULT_PITCH | FF_SWISS, "MS Sans Serif");
+    pst_theme_init(&g_app.theme);
+    pst_popup_init(&g_app.popup);
+
+    g_app.top_band = ps_static(hwnd, "", IDC_TOP_BAND, SS_LEFT);
+    g_app.title = ps_static(hwnd, "PlankaStarten", IDC_TITLE,
+        SS_LEFTNOWORDWRAP);
+    SendMessageA(g_app.title, WM_SETFONT, (WPARAM)g_app.theme.title_font, TRUE);
+    g_app.subtitle = ps_static(hwnd,
+        "", IDC_SUBTITLE, SS_LEFTNOWORDWRAP);
+    SendMessageA(g_app.subtitle, WM_SETFONT, (WPARAM)g_app.theme.small_font, TRUE);
+    g_app.menu_bar = ps_static(hwnd, "", IDC_MENU_BAR, SS_LEFTNOWORDWRAP);
+    pst_menu_create_bar(hwnd, g_app.theme.small_font, &g_app.menus);
+    g_app.tool_panel = ps_static(hwnd, "", IDC_TOOL_PANEL, SS_LEFT);
+    g_app.workspace_label = ps_static(hwnd, "", IDC_WORKSPACE_LABEL,
+        SS_LEFTNOWORDWRAP);
+    g_app.source_group = ps_static(hwnd, "", IDC_SOURCE_GROUP,
+        SS_LEFTNOWORDWRAP);
+    g_app.backend_group = ps_static(hwnd, "", IDC_BACKEND_GROUP,
+        SS_LEFTNOWORDWRAP);
+    g_app.project_label = ps_static(hwnd, "", IDC_PROJECT_LABEL,
+        SS_LEFTNOWORDWRAP);
+    g_app.editor_label = ps_static(hwnd, "", IDC_EDITOR_LABEL,
+        SS_LEFTNOWORDWRAP);
+    g_app.procs_label = ps_static(hwnd, "", IDC_PROCS_LABEL,
+        SS_LEFTNOWORDWRAP);
+    g_app.command_label = ps_static(hwnd, "", IDC_COMMAND_LABEL,
+        SS_LEFTNOWORDWRAP);
+    g_app.output_label = ps_static(hwnd, "", IDC_OUTPUT_LABEL,
+        SS_LEFTNOWORDWRAP);
+
     g_app.status = CreateWindowExA(WS_EX_CLIENTEDGE, "STATIC",
-        "PlankaStarten ready", WS_CHILD | WS_VISIBLE,
+        "", WS_CHILD | WS_VISIBLE,
         0, 0, 100, 20, hwnd, (HMENU)(INT_PTR)IDC_STATUS,
         GetModuleHandleA(0), 0);
-    SendMessageA(g_app.status, WM_SETFONT, (WPARAM)g_app.ui_font, TRUE);
+    SendMessageA(g_app.status, WM_SETFONT, (WPARAM)g_app.theme.ui_font, TRUE);
     g_app.workspace_edit = ps_edit(hwnd, IDC_WORKSPACE, 0);
-    ps_button(hwnd, "Open", IDC_LOAD_DIR);
+    ps_button(hwnd, "", IDC_LOAD_DIR);
     g_app.file_tree = CreateWindowExA(WS_EX_CLIENTEDGE, WC_TREEVIEWA, "",
         WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_VSCROLL
             | TVS_HASBUTTONS | TVS_HASLINES | TVS_LINESATROOT
             | TVS_SHOWSELALWAYS,
         0, 0, 100, 100, hwnd, (HMENU)(INT_PTR)IDC_FILE_LIST,
         GetModuleHandleA(0), 0);
-    SendMessageA(g_app.file_tree, WM_SETFONT, (WPARAM)g_app.font, TRUE);
+    SendMessageA(g_app.file_tree, WM_SETFONT, (WPARAM)g_app.theme.font, TRUE);
     g_app.line_numbers = CreateWindowExA(WS_EX_CLIENTEDGE, "EDIT", "   1",
         WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_READONLY
             | ES_RIGHT | ES_AUTOVSCROLL,
         0, 0, 48, 100, hwnd, (HMENU)(INT_PTR)IDC_LINE_NUMBERS,
         GetModuleHandleA(0), 0);
-    SendMessageA(g_app.line_numbers, WM_SETFONT, (WPARAM)g_app.font, TRUE);
+    SendMessageA(g_app.line_numbers, WM_SETFONT, (WPARAM)g_app.theme.font, TRUE);
     g_app.editor = ps_edit(hwnd, IDC_EDITOR,
         ES_MULTILINE | ES_WANTRETURN | ES_AUTOVSCROLL | WS_VSCROLL);
     SendMessageA(g_app.editor, EM_SETMARGINS, EC_LEFTMARGIN, 6);
@@ -1630,31 +1820,31 @@ static void ps_create_controls(HWND hwnd)
         WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_VSCROLL | LBS_NOTIFY,
         0, 0, 100, 100, hwnd, (HMENU)(INT_PTR)IDC_PROC_LIST,
         GetModuleHandleA(0), 0);
-    SendMessageA(g_app.proc_list, WM_SETFONT, (WPARAM)g_app.font, TRUE);
-    g_app.proc_label = ps_label(hwnd, "Procedure", IDC_PROC_LABEL);
+    SendMessageA(g_app.proc_list, WM_SETFONT, (WPARAM)g_app.theme.font, TRUE);
+    g_app.proc_label = ps_label(hwnd, "", IDC_PROC_LABEL);
     g_app.proc_name = ps_edit(hwnd, IDC_PROC_NAME, 0);
-    g_app.args_label = ps_label(hwnd, "Arguments", IDC_ARGS_LABEL);
+    g_app.args_label = ps_label(hwnd, "", IDC_ARGS_LABEL);
     g_app.args_edit = ps_edit(hwnd, IDC_ARGS, 0);
-    g_app.result_label = ps_label(hwnd, "Result", IDC_RESULT_LABEL);
+    g_app.result_label = ps_label(hwnd, "", IDC_RESULT_LABEL);
     g_app.result_edit = ps_edit(hwnd, IDC_RESULT, ES_READONLY);
     g_app.command_edit = ps_edit(hwnd, IDC_COMMAND, 0);
     g_app.console = ps_edit(hwnd, IDC_CONSOLE,
         ES_MULTILINE | ES_AUTOVSCROLL | ES_READONLY | WS_VSCROLL);
 
-    ps_button(hwnd, "Save", IDC_SAVE);
-    ps_button(hwnd, "Format", IDC_FORMAT);
-    ps_button(hwnd, "Check", IDC_CHECK);
-    ps_button(hwnd, "Run", IDC_RUN);
-    ps_button(hwnd, "Compile", IDC_COMPILE);
-    ps_button(hwnd, "List", IDC_LIST);
+    ps_button(hwnd, "", IDC_SAVE);
+    ps_button(hwnd, "", IDC_FORMAT);
+    ps_button(hwnd, "", IDC_CHECK);
+    ps_button(hwnd, "", IDC_RUN);
+    ps_button(hwnd, "", IDC_COMPILE);
     ps_button(hwnd, "PBC", IDC_BYTECODE);
     ps_button(hwnd, "IR", IDC_IR);
     ps_button(hwnd, "Evid", IDC_EVIDENCE);
     ps_button(hwnd, "C", IDC_CGEN);
     ps_button(hwnd, "ASM", IDC_ASMGEN);
     ps_button(hwnd, "8086", IDC_ASM8086);
-    ps_button(hwnd, "Clear", IDC_CLEAR);
-    ps_button(hwnd, "Exec", IDC_EXEC);
+    ps_button(hwnd, "", IDC_CLEAR);
+    ps_button(hwnd, "", IDC_EXEC);
+    ps_apply_language();
 }
 
 static void ps_default_workspace(void)
@@ -1676,6 +1866,242 @@ static void ps_default_workspace(void)
     SetWindowTextA(g_app.command_edit, "run");
 }
 
+static void ps_action_open_workspace(void *userdata)
+{
+    (void)userdata;
+    ps_select_folder();
+}
+
+static void ps_action_save(void *userdata)
+{
+    (void)userdata;
+    ps_save_current();
+}
+
+static void ps_action_exit(void *userdata)
+{
+    (void)userdata;
+    PostMessageA(g_app.hwnd, WM_CLOSE, 0, 0);
+}
+
+static void ps_action_select_all(void *userdata)
+{
+    (void)userdata;
+    SetFocus(g_app.editor);
+    SendMessageA(g_app.editor, EM_SETSEL, 0, -1);
+}
+
+static void ps_action_copy(void *userdata)
+{
+    (void)userdata;
+    SetFocus(g_app.editor);
+    SendMessageA(g_app.editor, WM_COPY, 0, 0);
+}
+
+static void ps_action_paste(void *userdata)
+{
+    (void)userdata;
+    SetFocus(g_app.editor);
+    SendMessageA(g_app.editor, WM_PASTE, 0, 0);
+}
+
+static void ps_action_format(void *userdata)
+{
+    (void)userdata;
+    ps_format_plk_in_editor();
+}
+
+static void ps_find_text_in_editor(const char *needle)
+{
+    char *text;
+    char *hit;
+    int len;
+
+    if (needle == 0 || needle[0] == '\0') {
+        SetFocus(g_app.proc_list);
+        ps_set_status(g_app.lang == PST_LANG_DE
+            ? "Prozedurliste fokussiert"
+            : "Procedure list focused");
+        return;
+    }
+    len = GetWindowTextLengthA(g_app.editor);
+    text = (char *)malloc((size_t)len + 1);
+    if (text == 0) {
+        ps_set_status(g_app.lang == PST_LANG_DE ? "Suche fehlgeschlagen"
+            : "Search failed");
+        return;
+    }
+    GetWindowTextA(g_app.editor, text, len + 1);
+    hit = strstr(text, needle);
+    if (hit != 0) {
+        int start;
+
+        start = (int)(hit - text);
+        SetFocus(g_app.editor);
+        SendMessageA(g_app.editor, EM_SETSEL, start,
+            start + (int)strlen(needle));
+        SendMessageA(g_app.editor, EM_SCROLLCARET, 0, 0);
+        ps_set_status(g_app.lang == PST_LANG_DE
+            ? "Prozedur im Editor markiert"
+            : "Procedure marked in editor");
+    } else {
+        ps_set_status(g_app.lang == PST_LANG_DE
+            ? "Prozedur nicht im Editor gefunden"
+            : "Procedure not found in editor");
+    }
+    free(text);
+}
+
+static void ps_action_find_procedure(void *userdata)
+{
+    char proc[128];
+
+    (void)userdata;
+    GetWindowTextA(g_app.proc_name, proc, sizeof(proc));
+    pst_popup_show_search(&g_app.popup, g_app.hwnd,
+        pst_text(g_app.lang, PST_T_SEARCH_TITLE),
+        pst_text(g_app.lang, PST_T_SEARCH_LABEL),
+        proc,
+        pst_text(g_app.lang, PST_T_FIND),
+        pst_text(g_app.lang, PST_T_PROC_LIST),
+        g_app.theme.title_font, g_app.theme.ui_font);
+}
+
+static void ps_apply_popup_search(void)
+{
+    char query[256];
+
+    if (!pst_popup_get_text(&g_app.popup, query, sizeof(query))) {
+        GetWindowTextA(g_app.proc_name, query, sizeof(query));
+    }
+    ps_find_text_in_editor(query);
+}
+
+static void ps_action_focus_procedures(void *userdata)
+{
+    (void)userdata;
+    SetFocus(g_app.proc_list);
+    ps_set_status(g_app.lang == PST_LANG_DE
+        ? "Prozedurliste fokussiert"
+        : "Procedure list focused");
+}
+
+static void ps_action_focus_editor(void *userdata)
+{
+    (void)userdata;
+    SetFocus(g_app.editor);
+    ps_update_cursor_status();
+}
+
+static void ps_action_check(void *userdata)
+{
+    (void)userdata;
+    ps_check_project();
+}
+
+static void ps_action_run(void *userdata)
+{
+    (void)userdata;
+    ps_run_proc();
+}
+
+static void ps_action_compile(void *userdata)
+{
+    (void)userdata;
+    ps_compile_active();
+}
+
+static void ps_action_artifact(void *userdata, const char *kind)
+{
+    (void)userdata;
+    ps_write_artifact(kind);
+}
+
+static void ps_open_shell_path(const char *path)
+{
+    HINSTANCE launched;
+
+    launched = ShellExecuteA(g_app.hwnd, "open", path, "", "",
+        SW_SHOWNORMAL);
+    if ((INT_PTR)launched <= 32) {
+        ps_appendf("open failed: %s", path);
+    }
+}
+
+static void ps_action_open_build_folder(void *userdata)
+{
+    char path[PS_MAX_PATH_TEXT];
+
+    (void)userdata;
+    CreateDirectoryA("build", 0);
+    GetFullPathNameA("build", sizeof(path), path, 0);
+    ps_open_shell_path(path);
+}
+
+static void ps_action_open_workspace_folder(void *userdata)
+{
+    char path[PS_MAX_PATH_TEXT];
+
+    (void)userdata;
+    GetWindowTextA(g_app.workspace_edit, path, sizeof(path));
+    if (path[0] != '\0') {
+        ps_open_shell_path(path);
+    }
+}
+
+static void ps_action_set_language(void *userdata, PST_LANG lang)
+{
+    (void)userdata;
+    g_app.lang = lang;
+    ps_apply_language();
+    ps_appendf("language: %s", pst_language_name(lang));
+}
+
+static void ps_action_show_commands(void *userdata)
+{
+    (void)userdata;
+    pst_popup_show_message(&g_app.popup, g_app.hwnd,
+        pst_text(g_app.lang, PST_T_COMMANDS_TITLE),
+        pst_text(g_app.lang, PST_T_COMMANDS_BODY),
+        g_app.theme.title_font, g_app.theme.ui_font);
+}
+
+static void ps_action_show_about(void *userdata)
+{
+    pst_popup_show_message(&g_app.popup, g_app.hwnd,
+        pst_text(g_app.lang, PST_T_ABOUT_TITLE),
+        pst_text(g_app.lang, PST_T_ABOUT_BODY),
+        g_app.theme.title_font, g_app.theme.ui_font);
+    (void)userdata;
+}
+
+static int ps_dispatch_menu_command(int id)
+{
+    PST_MENU_ACTIONS actions;
+
+    memset(&actions, 0, sizeof(actions));
+    actions.open_workspace = ps_action_open_workspace;
+    actions.save = ps_action_save;
+    actions.exit_app = ps_action_exit;
+    actions.select_all = ps_action_select_all;
+    actions.copy = ps_action_copy;
+    actions.paste = ps_action_paste;
+    actions.format = ps_action_format;
+    actions.find_procedure = ps_action_find_procedure;
+    actions.focus_procedures = ps_action_focus_procedures;
+    actions.focus_editor = ps_action_focus_editor;
+    actions.check = ps_action_check;
+    actions.run_selected = ps_action_run;
+    actions.compile_launch = ps_action_compile;
+    actions.artifact = ps_action_artifact;
+    actions.open_build_folder = ps_action_open_build_folder;
+    actions.open_workspace_folder = ps_action_open_workspace_folder;
+    actions.set_language = ps_action_set_language;
+    actions.show_commands = ps_action_show_commands;
+    actions.show_about = ps_action_show_about;
+    return pst_menu_dispatch(id, &actions);
+}
+
 static LRESULT CALLBACK ps_wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 {
     int id;
@@ -1685,13 +2111,19 @@ static LRESULT CALLBACK ps_wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     case WM_CREATE:
         g_app.hwnd = hwnd;
         g_app.selected_file = -1;
+        g_app.lang = PST_LANG_EN;
         ps_create_controls(hwnd);
         ps_default_workspace();
         return 0;
     case WM_WINDOWPOSCHANGING:
         ps_clamp_windowpos((WINDOWPOS *)lp);
         return 0;
+    case WM_ENTERSIZEMOVE:
+    case WM_MOVE:
+        pst_popup_close(&g_app.popup);
+        break;
     case WM_SIZE:
+        pst_popup_close(&g_app.popup);
         if (wp != SIZE_MINIMIZED) {
             ps_enforce_min_window(hwnd);
         }
@@ -1700,10 +2132,34 @@ static LRESULT CALLBACK ps_wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     case WM_GETMINMAXINFO:
         ps_set_min_track((MINMAXINFO *)lp);
         return 0;
+    case WM_CTLCOLORSTATIC:
+        return (LRESULT)pst_theme_static_brush(&g_app.theme,
+            (HWND)lp, (HDC)wp);
+    case WM_CTLCOLOREDIT:
+        return (LRESULT)pst_theme_edit_brush(&g_app.theme,
+            (HWND)lp, (HDC)wp);
+    case WM_CTLCOLORLISTBOX:
+        return (LRESULT)pst_theme_list_brush(&g_app.theme,
+            (HWND)lp, (HDC)wp);
     case WM_COMMAND:
         id = LOWORD(wp);
         code = HIWORD(wp);
-        if (id == IDC_LOAD_DIR) {
+        if (pst_menu_is_bar_id(id)) {
+            HWND anchor;
+
+            anchor = (HWND)lp;
+            if (anchor == 0) {
+                anchor = GetDlgItem(hwnd, id);
+            }
+            pst_menu_show(&g_app.popup, hwnd, anchor, id, g_app.lang,
+                g_app.theme.ui_font);
+        } else if (id == IDM_POPUP_SEARCH_APPLY) {
+            ps_apply_popup_search();
+        } else if (id == IDM_POPUP_SEARCH_FOCUS_PROC) {
+            ps_action_focus_procedures(0);
+        } else if (ps_dispatch_menu_command(id)) {
+            return 0;
+        } else if (id == IDC_LOAD_DIR) {
             ps_select_folder();
         } else if (id == IDC_PROC_LIST && code == LBN_SELCHANGE) {
             ps_update_proc_from_list(0);
@@ -1720,7 +2176,7 @@ static LRESULT CALLBACK ps_wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             ps_save_current();
         } else if (id == IDC_FORMAT) {
             ps_format_plk_in_editor();
-        } else if (id == IDC_CHECK || id == IDC_LIST) {
+        } else if (id == IDC_CHECK) {
             ps_check_project();
         } else if (id == IDC_RUN) {
             ps_run_proc();
@@ -1765,12 +2221,8 @@ static LRESULT CALLBACK ps_wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         }
         break;
     case WM_DESTROY:
-        if (g_app.font != 0) {
-            DeleteObject(g_app.font);
-        }
-        if (g_app.ui_font != 0) {
-            DeleteObject(g_app.ui_font);
-        }
+        pst_popup_destroy(&g_app.popup);
+        pst_theme_destroy(&g_app.theme);
         PostQuitMessage(0);
         return 0;
     default:

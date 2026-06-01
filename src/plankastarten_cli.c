@@ -221,6 +221,108 @@ static void ps_format_results(const PLANKAC_RESULT *result)
     printf("\n");
 }
 
+static void ps_print_result_block(const PLANKAC_RESULT *result)
+{
+    int i;
+    char value[64];
+
+    printf("\nResult\n");
+    printf("------\n");
+    for (i = 0; i < result->count; ++i) {
+        plankac_format(result->value[i], value, sizeof(value));
+        printf("R%d = %s\n", i, value);
+    }
+}
+
+static int ps_name_ends_with(const char *text, const char *suffix)
+{
+    size_t a;
+    size_t b;
+
+    if (text == 0 || suffix == 0) {
+        return 0;
+    }
+    a = strlen(text);
+    b = strlen(suffix);
+    return a >= b && strcmp(text + a - b, suffix) == 0;
+}
+
+static int ps_proc_score(const PLANKAC_PROC_INFO *info)
+{
+    int score;
+
+    if (info == 0) {
+        return -1000000;
+    }
+    if (strcmp(info->name, "type_sheet") == 0) {
+        return -1000000;
+    }
+    score = info->number;
+    if (strcmp(info->name, "start") == 0) {
+        score += 100000;
+    } else if (strcmp(info->name, "main") == 0) {
+        score += 95000;
+    } else if (strstr(info->name, "_app") != 0) {
+        score += 85000;
+    } else if (ps_name_ends_with(info->name, "_demo")) {
+        score += 75000;
+    } else if (ps_name_ends_with(info->name, "_session")) {
+        score += 65000;
+    }
+    if (info->argc == 0) {
+        score += 500;
+    }
+    return score;
+}
+
+static int ps_choose_proc(PLANKAC_CONTEXT *ctx, PLANKAC_PROC_INFO *chosen)
+{
+    PLANKAC_PROC_INFO info;
+    int best;
+    int score;
+    int i;
+    int n;
+
+    if (plankac_context_find_proc(ctx, "start", chosen)) {
+        return 1;
+    }
+    best = -1000000;
+    n = plankac_context_proc_count(ctx);
+    for (i = 0; i < n; ++i) {
+        if (plankac_context_get_proc(ctx, i, &info)) {
+            score = ps_proc_score(&info);
+            if (score > best) {
+                best = score;
+                *chosen = info;
+            }
+        }
+    }
+    return best > -1000000;
+}
+
+static int ps_prompt_args(const PLANKAC_PROC_INFO *info, double *args)
+{
+    char line[128];
+    int i;
+
+    if (info->argc == 0) {
+        printf("Press Enter to run %s...", info->name);
+        fgets(line, sizeof(line), stdin);
+        return 1;
+    }
+    printf("Input\n");
+    printf("-----\n");
+    for (i = 0; i < info->argc; ++i) {
+        printf("V%d: ", i);
+        fflush(stdout);
+        if (fgets(line, sizeof(line), stdin) == 0) {
+            return 0;
+        }
+        args[i] = strtod(line, 0);
+    }
+    return 1;
+}
+
 static int ps_load_sources(PLANKAC_CONTEXT *ctx, int count, char **paths,
     char *err, unsigned err_size)
 {
@@ -332,6 +434,55 @@ static int ps_cmd_run(int source_count, char **sources, const char *proc,
     return 0;
 }
 
+static int ps_cmd_app(int source_count, char **sources, const char *proc)
+{
+    PLANKAC_CONTEXT *ctx;
+    PLANKAC_PROC_INFO info;
+    PLANKAC_RESULT result;
+    double args[PLANKAC_MAX_ARGS];
+    char err[512];
+
+    ctx = plankac_create();
+    if (ctx == 0) {
+        printf("PlankaStarten: cannot create PlankaC context\n");
+        return 1;
+    }
+    if (!ps_load_sources(ctx, source_count, sources, err, sizeof(err))) {
+        printf("load failed: %s\n", err);
+        plankac_destroy(ctx);
+        return 1;
+    }
+    if (proc != 0 && proc[0] != '\0') {
+        if (!plankac_context_find_proc(ctx, proc, &info)) {
+            printf("unknown procedure: %s\n", proc);
+            plankac_destroy(ctx);
+            return 1;
+        }
+    } else if (!ps_choose_proc(ctx, &info)) {
+        printf("no runnable procedure found\n");
+        plankac_destroy(ctx);
+        return 1;
+    }
+    printf("PlankaStarten application\n");
+    printf("Runtime: PlankaC API\n\n");
+    printf("Procedure: P%d %s (%d -> %d)\n\n",
+        info.number, info.name, info.argc, info.results);
+    if (!ps_prompt_args(&info, args)) {
+        plankac_destroy(ctx);
+        return 1;
+    }
+    err[0] = '\0';
+    if (!plankac_context_run(ctx, info.name, args, info.argc, &result,
+            err, sizeof(err))) {
+        printf("run failed: %s\n", err);
+        plankac_destroy(ctx);
+        return 1;
+    }
+    ps_print_result_block(&result);
+    plankac_destroy(ctx);
+    return 0;
+}
+
 static int ps_cmd_write(int count, char **paths, const char *kind,
     const char *out_path)
 {
@@ -417,6 +568,7 @@ static void ps_usage(void)
     printf("  plankastarten_cli list <file.plk> [more.plk...]\n");
     printf("  plankastarten_cli run <file.plk> <procedure> [args...]\n");
     printf("  plankastarten_cli run <file.plk> [more.plk...] -- <procedure> [args...]\n");
+    printf("  plankastarten_cli app <file.plk> [procedure]\n");
     printf("  plankastarten_cli compile <file.plk>\n");
     printf("  plankastarten_cli bytecode <file.plk> <out.pbc>\n");
     printf("  plankastarten_cli ir <file.plk> <out.ir>\n");
@@ -459,6 +611,9 @@ int main(int argc, char **argv)
     }
     if (strcmp(argv[1], "compile") == 0) {
         return ps_cmd_compile(argv[2]);
+    }
+    if (strcmp(argv[1], "app") == 0) {
+        return ps_cmd_app(1, argv + 2, argc >= 4 ? argv[3] : 0);
     }
     if (strcmp(argv[1], "bytecode") == 0 || strcmp(argv[1], "ir") == 0
             || strcmp(argv[1], "evidence") == 0

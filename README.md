@@ -44,6 +44,7 @@ src/plankastarten_gui.c       Win32-Arbeitsfenster in C
 src/plankastarten_cli.c       Konsolenprogramm fuer Tests und Skripte
 src/plankastarten_compile.c   native Compile-Schicht fuer Konsole und GUI
 examples/max3.plk             kleines Beispielprogramm
+examples/apps/                interaktive Konsolenbeispiele
 docs/api_connection.md        API-Grenze zwischen PlankaStarten und PlankaC
 docs/commands.md              Befehle der GUI und CLI
 ```
@@ -95,6 +96,7 @@ Nuetzliche Eingaben im Befehlsfeld:
 check
 run start
 run max3 4 9 7
+app
 compile
 format
 save
@@ -109,6 +111,21 @@ asm8086
 `compile` erkennt das Profil der aktiven `.plk`-Datei. Normale Prozedurdateien
 werden als Konsolenprogramme gebaut. GUI- und Cube-Profile werden als
 Windows-GUI-Programme gebaut und aus der grafischen Anwendung direkt gestartet.
+Konsolenprogramme koennen ohne Argumente gestartet werden; dann fragen sie
+ihre `V`-Argumente interaktiv ab, geben einen klaren `Result`-Block aus und
+warten vor dem Schliessen des Fensters.
+
+## Anwendungsbeispiele
+
+```bat
+build\plankastarten_cli.exe app examples\apps\loan_estimator.plk
+build\plankastarten_cli.exe app examples\apps\bmi_guard.plk
+build\plankastarten_cli.exe app examples\apps\vector_length.plk
+```
+
+Dies sind kleine `.plk`-Programme mit Eingabeaufforderung. Sie zeigen den
+Unterschied zwischen einem nackten Prozedurtest und einem gehosteten
+PlankaC-Programm.
 
 ## Kommandozeile
 
@@ -116,6 +133,7 @@ Windows-GUI-Programme gebaut und aus der grafischen Anwendung direkt gestartet.
 build\plankastarten_cli.exe check examples\max3.plk
 build\plankastarten_cli.exe list examples\max3.plk
 build\plankastarten_cli.exe run examples\max3.plk start
+build\plankastarten_cli.exe app examples\apps\loan_estimator.plk
 build\plankastarten_cli.exe run a.plk b.plk -- start
 build\plankastarten_cli.exe compile examples\max3.plk
 build\plankastarten_cli.exe evidence examples\max3.plk build\max3.evidence.json
@@ -179,6 +197,7 @@ library:
 - inspect procedures
 - edit and save source with line numbers and cursor position
 - run procedures with arguments
+- run `.plk` files as interactive console applications
 - write bytecode, IR, Evidence JSON, C, x86-64 ASM and 8086 ASM
 - build native executables
 - show output in a simple console panel
@@ -224,6 +243,7 @@ Useful command input:
 check
 run start
 run max3 4 9 7
+app
 compile
 format
 save
@@ -237,6 +257,17 @@ asm8086
 
 `compile` detects the active source profile. Console procedure sets become
 console executables. GUI and cube profiles become Windows GUI executables.
+Generated console executables can be launched without arguments. In that mode
+they choose an entry procedure, ask for `V` inputs, print a `Result` block and
+wait before closing.
+
+## Application Examples
+
+```bat
+build\plankastarten_cli.exe app examples\apps\loan_estimator.plk
+build\plankastarten_cli.exe app examples\apps\bmi_guard.plk
+build\plankastarten_cli.exe app examples\apps\vector_length.plk
+```
 
 ## CLI
 
@@ -244,6 +275,7 @@ console executables. GUI and cube profiles become Windows GUI executables.
 build\plankastarten_cli.exe check examples\max3.plk
 build\plankastarten_cli.exe list examples\max3.plk
 build\plankastarten_cli.exe run examples\max3.plk start
+build\plankastarten_cli.exe app examples\apps\loan_estimator.plk
 build\plankastarten_cli.exe run a.plk b.plk -- start
 build\plankastarten_cli.exe compile examples\max3.plk
 ```
